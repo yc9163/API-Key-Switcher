@@ -1,0 +1,23 @@
+﻿{
+  "name": "claude-cloudflare-gateway",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "mock": "node dev/mock-anthropic.mjs",
+    "dev": "wrangler dev --ip 127.0.0.1 --port 8799",
+    "test": "node --test test/usage.test.ts test/pricing.test.ts",
+    "check": "tsc --noEmit",
+    "migrate:local": "wrangler d1 migrations apply claude-usage --local",
+    "migrate": "wrangler d1 migrations apply claude-usage --remote",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0",
+    "wrangler": "^4.0.0",
+    "@cloudflare/workers-types": "^5.20261027.1"
+  }
+}

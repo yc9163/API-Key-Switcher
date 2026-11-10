@@ -1,0 +1,16 @@
+# Dependencies and Wrangler's local state
+node_modules/
+.wrangler/
+
+# Secrets and per-machine files: never commit these (this repository is public)
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+.env*
+gateway-keys/
+GATEWAY_KEY.txt
+NTFY_TOPIC.txt
+DASHBOARD_LINK.txt
+
+# Local copies of usage data (sync-usage.ps1)
+usage/

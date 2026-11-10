@@ -1,0 +1,37 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "claude-multi-key-gateway",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-20",
+  "workers_dev": true,
+  // Per-request token usage (no prompts or replies). Schema: migrations/. Pull it locally with sync-usage.ps1.
+  "d1_databases": [
+    { "binding": "USAGE_DB", "database_name": "claude-usage", "database_id": "8ceef542-1ceb-494c-9153-233b464e6a02" }
+  ],
+  "vars": {
+    // Day of the month each key slot's monthly API credit expires: the day in the expiry date shown in
+    // Console > Billing > Promotional credits (UTC). The key whose credit expires soonest is used first.
+    // 0 = unknown (used after every dated key). Edit, then run: npx wrangler deploy
+    "CREDIT_EXPIRY_DAY_1": "9",
+    "CREDIT_EXPIRY_DAY_2": "9",
+    "CREDIT_EXPIRY_DAY_3": "23",
+    "CREDIT_EXPIRY_DAY_4": "23",
+    "CREDIT_EXPIRY_DAY_5": "27",
+    "CREDIT_EXPIRY_DAY_6": "24",
+    // Credit each key receives per billing cycle (Max 20x: $200), for the dashboard's "used of" meters.
+    "MONTHLY_CREDIT_USD": "200",
+    // Model the key check sends its zero-output request (max_tokens: 0) to.
+    "HEALTH_CHECK_MODEL": "claude-opus-5-5",
+    // Automatic key checks at most once per this many minutes (on gateway traffic or dashboard visits; minimum 5).
+    // Real requests that hit a broken key report it immediately regardless. E.g. "480" = about three times a day.
+    "KEY_CHECK_INTERVAL_MINUTES": "60",
+    // Most the gateway may spend in any rolling 24 hours; further requests get a 429 until spending ages out.
+    // A runaway guard ("0" = no cap). Phone alerts at 80% and 100% when the NTFY_TOPIC secret is set.
+    "DAILY_SPEND_CAP_USD": "100",
+    // This Worker's address, used as the link in phone notifications.
+    "PUBLIC_URL": "https://claude-multi-key-gateway.yunkangchen2017.workers.dev"
+  }
+  // No cron trigger: this account's 5 free cron slots are used by other Workers. Key checks run at most every
+  // 15 minutes on gateway traffic and dashboard loads instead (src/dashboard.ts maybeCheckKeys). With Workers
+  // Paid, adding  "triggers": { "crons": ["*/15 * * * *"] }  also checks while nothing is using the gateway.
+}

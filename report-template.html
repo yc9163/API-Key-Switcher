@@ -1,0 +1,962 @@
+<!doctype html>
+<!-- Usage dashboard. The gateway serves it live at /dashboard (DATA stays null and the page fetches
+     /dashboard/data every minute); sync-usage.ps1 also saves an offline snapshot to usage\report.html by
+     replacing the DATA placeholder below with the same data. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<!-- Inline icon: browsers then never request /favicon.ico from the gateway. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%232a78d6'/%3E%3Cpath d='M4.5 11.5v-3M8 11.5v-7M11.5 11.5v-5' stroke='white' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E">
+<title>Claude credit usage</title>
+<style>
+  .viz-root {
+    color-scheme: light;
+    --page: #f9f9f7; --surface-1: #fcfcfb; --surface-2: #f0efec;
+    --text-primary: #0b0b0b; --text-secondary: #52514e; --text-muted: #898781;
+    --grid: #e1e0d9; --baseline: #c3c2b7; --border: rgba(11,11,11,0.10);
+    --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a;
+    --series-4: #eda100; --series-5: #e87ba4; --series-6: #008300;
+    --other: #898781;
+    --meter-fill: #2a78d6; --meter-track: #cde2fb;
+    /* sequential blue for the heatmap, near zero receding toward the surface */
+    --seq-0: #f0efec; --seq-1: #cde2fb; --seq-2: #9ec5f4; --seq-3: #5598e7; --seq-4: #2a78d6; --seq-5: #1c5cab;
+    --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) .viz-root {
+      color-scheme: dark;
+      --page: #0d0d0d; --surface-1: #1a1a19; --surface-2: #232321;
+      --text-primary: #f0efec; --text-secondary: #c3c2b7; --text-muted: #898781;
+      --grid: #2c2c2a; --baseline: #383835; --border: rgba(255,255,255,0.10);
+      --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70;
+      --series-4: #c98500; --series-5: #d55181; --series-6: #008300;
+      --meter-fill: #3987e5; --meter-track: color-mix(in srgb, #3987e5 18%, #1a1a19);
+      --seq-0: #232321; --seq-1: #0d366b; --seq-2: #184f95; --seq-3: #256abf; --seq-4: #3987e5; --seq-5: #86b6ef;
+    }
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; } /* the banner and button set display, which would override hidden */
+  body { margin: 0; }
+  .viz-root {
+    min-height: 100vh; background: var(--page); color: var(--text-primary);
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; padding: 24px;
+  }
+  main { max-width: 1120px; margin: 0 auto; display: grid; gap: 20px; }
+  h1 { font-size: 22px; font-weight: 600; margin: 0; }
+  h2 { font-size: 17px; font-weight: 600; margin: 0; }
+  h3 { font-size: 15px; font-weight: 600; margin: 0 0 2px; }
+  section { display: grid; gap: 12px; }
+  .sub { color: var(--text-secondary); margin: 2px 0 0; }
+  .muted { color: var(--text-muted); }
+  .top { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px; }
+  .title-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+  button { font: inherit; font-size: 13px; color: var(--text-primary); background: var(--surface-1); border: 1px solid var(--baseline);
+           border-radius: 8px; padding: 6px 12px; cursor: pointer; }
+  button:hover { background: var(--surface-2); }
+  button:disabled { color: var(--text-muted); cursor: default; }
+  .toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 10px; }
+  .seg { display: inline-flex; border: 1px solid var(--baseline); border-radius: 8px; overflow: hidden; background: var(--surface-1); }
+  .seg button { border: 0; border-radius: 0; padding: 5px 11px; background: transparent; color: var(--text-secondary); }
+  .seg button + button { border-left: 1px solid var(--grid); }
+  .seg button[aria-pressed="true"] { background: var(--surface-2); color: var(--text-primary); font-weight: 600; }
+  .banner { display: flex; gap: 10px; align-items: flex-start; background: var(--surface-1); border: 1px solid var(--critical);
+            border-left-width: 4px; border-radius: 12px; padding: 14px 18px; }
+  .banner svg { margin-top: 2px; flex: none; }
+  .banner strong { display: block; font-weight: 600; }
+  .banner ul { margin: 4px 0 0; padding-left: 18px; color: var(--text-secondary); }
+  .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; min-width: 0; }
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+  .kpi-label { color: var(--text-secondary); font-size: 13px; }
+  .kpi-value { font-size: 28px; font-weight: 600; margin-top: 2px; }
+  .kpi-note { color: var(--text-muted); font-size: 12px; margin-top: 2px; }
+  .spark { display: block; width: 100%; height: 28px; margin-top: 8px; overflow: visible; }
+  .swatch { width: 10px; height: 10px; border-radius: 2px; flex: none; display: inline-block; }
+  .pill { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text-secondary);
+          border: 1px solid var(--border); border-radius: 999px; padding: 2px 8px 2px 6px; white-space: nowrap; }
+  .pill svg { flex: none; }
+  .meter { height: 8px; border-radius: 4px; background: var(--meter-track); overflow: hidden; margin: 6px 0 4px; }
+  .meter > div { height: 100%; background: var(--meter-fill); border-radius: 4px; min-width: 2px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 10px 0 4px; color: var(--text-secondary); font-size: 13px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .chart { position: relative; }
+  .chart svg { display: block; width: 100%; overflow: visible; }
+  .chart text { fill: var(--text-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .chart .cap { fill: var(--text-secondary); }
+  .hit { fill: transparent; cursor: default; outline: none; }
+  .hit:hover, .hit:focus { fill: var(--surface-2); }
+  .tooltip { position: absolute; pointer-events: none; background: var(--surface-1); border: 1px solid var(--border);
+             border-radius: 8px; padding: 8px 10px; box-shadow: 0 4px 16px rgba(0,0,0,0.12); font-size: 12px;
+             min-width: 170px; display: none; z-index: 2; }
+  .tooltip .t-date { color: var(--text-secondary); margin-bottom: 4px; }
+  .tooltip .row { display: flex; align-items: center; gap: 8px; }
+  .tooltip .key { width: 12px; height: 2px; border-radius: 1px; flex: none; }
+  .tooltip .v { font-weight: 600; font-variant-numeric: tabular-nums; min-width: 60px; }
+  .tooltip .n { color: var(--text-secondary); }
+  .tooltip .total { border-top: 1px solid var(--grid); margin-top: 4px; padding-top: 4px; }
+  .grid2 { display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(280px, 1fr); gap: 12px; align-items: start; }
+  .split { display: flex; height: 14px; gap: 2px; margin: 12px 0 10px; }
+  .split > div { min-width: 2px; }
+  .split > div:first-child { border-radius: 4px 0 0 4px; }
+  .split > div:last-child { border-radius: 0 4px 4px 0; }
+  .split > div:only-child { border-radius: 4px; }
+  .savings { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--grid); display: grid; gap: 4px; font-size: 13px; }
+  .savings .line { display: flex; justify-content: space-between; gap: 12px; color: var(--text-secondary); }
+  .savings .line span:last-child { font-variant-numeric: tabular-nums; color: var(--text-primary); }
+  .savings .net { display: flex; align-items: flex-start; gap: 6px; margin-top: 6px; color: var(--text-primary); }
+  .savings .net svg { margin-top: 3px; flex: none; }
+  details { margin-top: 10px; }
+  summary { cursor: pointer; color: var(--text-secondary); font-size: 13px; }
+  .table-wrap { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin-top: 8px; }
+  th { text-align: left; font-weight: 600; color: var(--text-secondary); border-bottom: 1px solid var(--baseline); padding: 6px 8px; white-space: nowrap; }
+  td { border-bottom: 1px solid var(--grid); padding: 6px 8px; vertical-align: top; }
+  th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .name { display: inline-flex; align-items: center; gap: 8px; }
+  .note { display: inline-flex; align-items: center; gap: 5px; color: var(--text-secondary); }
+  .empty { color: var(--text-muted); padding: 12px 0 4px; }
+  .footnote { color: var(--text-muted); font-size: 12px; margin: 0; }
+  code { font-size: 12px; background: var(--surface-2); padding: 1px 4px; border-radius: 4px; }
+  .stale { opacity: 0.6; }
+  .notice { display: flex; gap: 8px; align-items: flex-start; color: var(--text-secondary); font-size: 13px;
+            border: 1px solid var(--border); border-left: 4px solid var(--warning); border-radius: 12px; padding: 10px 14px; background: var(--surface-1); }
+  .notice svg { margin-top: 2px; flex: none; }
+  a.pill { text-decoration: none; }
+  a.pill:hover { background: var(--surface-2); }
+  .badge { font-size: 11px; font-weight: 600; color: var(--text-primary); background: var(--surface-2); border-radius: 4px; padding: 1px 5px; margin-left: 6px; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; color: var(--text-secondary); }
+  /* Keys: one row per key on wide screens, a small card per key on phones */
+  .keylist { padding: 6px 20px; }
+  .krow { display: grid; grid-template-columns: minmax(150px, 1.1fr) minmax(170px, 1.5fr) minmax(110px, 0.9fr) minmax(100px, 0.8fr) minmax(70px, 0.6fr) minmax(120px, 1fr);
+          gap: 4px 16px; align-items: center; padding: 11px 0; border-bottom: 1px solid var(--grid); font-size: 13px; }
+  .krow:last-child { border-bottom: 0; }
+  .krow.khead { color: var(--text-secondary); font-weight: 600; font-size: 12px; padding: 8px 0; border-bottom-color: var(--baseline); }
+  .krow .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .kname { display: flex; flex-direction: column; gap: 3px; }
+  .kname .kline { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; font-weight: 600; font-size: 14px; }
+  .kname .org { color: var(--text-muted); font-size: 11px; }
+  .kused .amount { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .kused .meter { margin: 5px 0 0; }
+  .kmsg { grid-column: 1 / -1; margin: 0; font-size: 12px; color: var(--text-secondary); overflow-wrap: anywhere; }
+  @media (max-width: 760px) {
+    .keylist { padding: 4px 14px; }
+    .krow.khead { display: none; }
+    .krow { grid-template-columns: 1fr 1fr; gap: 8px 12px; }
+    .krow .kname, .krow .kused { grid-column: 1 / -1; }
+    .krow [data-label]::before { content: attr(data-label); display: block; color: var(--text-muted); font-size: 11px; font-weight: 400; }
+    .krow .num { text-align: left; }
+  }
+  .heat { position: relative; display: grid; grid-template-columns: 34px repeat(24, minmax(0, 1fr)); gap: 2px; margin-top: 12px; }
+  .heat .day { color: var(--text-muted); font-size: 11px; align-self: center; }
+  .heat .cell { height: 22px; border-radius: 2px; outline: none; }
+  .heat .cell:hover, .heat .cell:focus { box-shadow: 0 0 0 2px var(--text-primary); }
+  .heat .hr { color: var(--text-muted); font-size: 11px; white-space: nowrap; overflow: visible; }
+  .scale { display: flex; align-items: center; gap: 4px; margin-top: 10px; color: var(--text-muted); font-size: 12px; }
+  .scale span.box { width: 14px; height: 10px; border-radius: 2px; display: inline-block; }
+  @media (max-width: 600px) { .heat { grid-template-columns: 26px repeat(24, minmax(0, 1fr)); gap: 1px; } .heat .cell { height: 14px; } }
+  @media (max-width: 860px) { .grid2 { grid-template-columns: 1fr; } }
+  @media (max-width: 600px) {
+    .viz-root { padding: 14px; }
+    .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .kpi-value { font-size: 22px; }
+    .card { padding: 14px; }
+  }
+</style>
+</head>
+<body>
+<div class="viz-root">
+<main id="main">
+  <header class="top">
+    <div>
+      <div class="title-row"><h1>Claude credit usage</h1><span id="overall"></span><span id="anthropic"></span></div>
+      <p class="sub" id="synced">Loading the latest usage…</p>
+    </div>
+    <button type="button" id="check" hidden>Check keys now</button>
+  </header>
+  <div class="banner" id="banner" role="alert" hidden></div>
+  <div class="notice" id="incident" role="status" hidden></div>
+
+  <section aria-labelledby="credit-title">
+    <div>
+      <h2 id="credit-title">This credit cycle</h2>
+      <p class="sub" id="credit-sub">Requests use the key whose credit expires soonest until it runs out or fails.</p>
+    </div>
+    <div class="kpis" id="credit-kpis"></div>
+    <div class="card keylist" id="keys" aria-label="Keys"></div>
+  </section>
+
+  <section aria-labelledby="usage-title">
+    <div class="toolbar">
+      <h2 id="usage-title">Usage</h2>
+      <div class="controls">
+        <div class="seg" role="group" aria-label="Time range" id="range"></div>
+        <div class="seg" role="group" aria-label="Group by" id="groupby"></div>
+      </div>
+    </div>
+    <div class="kpis" id="range-kpis"></div>
+    <div class="card">
+      <h3 id="chart-title"></h3>
+      <p class="sub">Estimated USD per UTC day.</p>
+      <div class="legend" id="legend"></div>
+      <div class="chart" id="chart"><div class="tooltip" id="tooltip" role="status"></div></div>
+      <details><summary>Show as table</summary><div class="table-wrap" id="daily-table"></div></details>
+    </div>
+    <div class="card">
+      <h3>Activity by hour</h3>
+      <p class="sub" id="heat-sub"></p>
+      <div class="heat" id="heat"></div>
+      <div class="scale" id="heat-scale"></div>
+      <p class="sub" id="heat-summary" style="margin-top:8px"></p>
+      <details><summary>Show busiest hours as a table</summary><div class="table-wrap" id="heat-table"></div></details>
+    </div>
+    <div class="grid2">
+      <div class="card">
+        <h3 id="breakdown-title"></h3>
+        <p class="sub">Give each app or device its own gateway key (<code>new-gateway-key.ps1 -Name phone</code>) or label requests with an <code>x-gateway-app</code> header to split usage here.</p>
+        <div class="table-wrap" id="breakdown"></div>
+      </div>
+      <div class="card">
+        <h3>Where the money goes</h3>
+        <p class="sub">Estimated cost by token type in this period.</p>
+        <div id="tokens"></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="card" aria-labelledby="models-title">
+    <h3 id="models-title">Models your keys can use</h3>
+    <p class="sub" id="models-sub"></p>
+    <div class="table-wrap" id="models"></div>
+  </section>
+
+  <section class="card" aria-labelledby="errors-title">
+    <h3 id="errors-title">Recent errors</h3>
+    <div class="table-wrap" id="errors"></div>
+  </section>
+  <p class="footnote"><span id="alerts-note"></span> <span id="cost-note"></span> <span id="pricing-note">Amounts are estimates from Anthropic's published prices</span> for traffic through the gateway only; Console &gt; Billing has each organization's exact balance. Days are UTC, matching the credit expiry dates.</p>
+</main>
+</div>
+<script>
+const DATA = /*__DATA__*/null;
+</script>
+<script>
+(() => {
+  const DAY = 86400000;
+  const REFRESH_MS = 60000;
+  const KEY_CHECK_APP = '(key check)';
+  const $ = (id) => document.getElementById(id);
+  const SVGNS = 'http://www.w3.org/2000/svg';
+  function el(tag, attrs, ...kids) {
+    const n = tag.startsWith('svg:') ? document.createElementNS(SVGNS, tag.slice(4)) : document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs || {})) if (v !== null && v !== undefined) n.setAttribute(k, v);
+    for (const kid of kids.flat()) if (kid !== null && kid !== undefined) n.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+    return n;
+  }
+  const usd = (v) => {
+    if (!v) return '$0';
+    const a = Math.abs(v), sign = v < 0 ? '-' : '';
+    if (a < 0.0001) return '<$0.0001';
+    if (a < 0.01) return sign + '$' + a.toFixed(4);
+    if (a < 1000) return sign + '$' + a.toFixed(2);
+    return sign + '$' + Math.round(a).toLocaleString('en-US');
+  };
+  const compact = (v) => v >= 1e6 ? (v / 1e6).toFixed(v >= 1e7 ? 0 : 1) + 'M' : v >= 1e3 ? (v / 1e3).toFixed(v >= 1e4 ? 0 : 1) + 'K' : String(Math.round(v));
+  const pct = (v) => v >= 0.995 ? '100%' : v > 0 && v < 0.01 ? '<1%' : Math.round(v * 100) + '%';
+  const parseDay = (s) => Date.parse(s + 'T00:00:00Z');
+  const isoDay = (t) => new Date(t).toISOString().slice(0, 10);
+  const fmtDay = (t) => new Date(t).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+  const localTime = (iso) => new Date(iso).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  function ago(iso) {
+    const s = (Date.now() - Date.parse(iso)) / 1000;
+    if (s < 60) return 'just now';
+    if (s < 3600) return `${Math.round(s / 60)} min ago`;
+    if (s < 86400) return `${Math.round(s / 3600)} h ago`;
+    return localTime(iso);
+  }
+  const STATUS_ICON = {
+    good: 'M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13Zm3 4.7-3.6 4a.7.7 0 0 1-1 0L4.9 8.6l1-1 1 1.1 3.1-3.5 1 1Z',
+    warning: 'M8 1.8 15 14H1L8 1.8Zm-.7 4.7v3.6h1.4V6.5H7.3Zm0 4.7v1.4h1.4v-1.4H7.3Z',
+    critical: 'M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13Zm2.6 3 1 1L9 8l2.6 2.6-1 1L8 9l-2.6 2.6-1-1L7 8 4.4 5.4l1-1L8 7l2.6-2.5Z',
+    neutral: 'M8 5a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z',
+  };
+  const icon = (kind, size = 14) => el('svg:svg', { width: size, height: size, viewBox: '0 0 16 16', 'aria-hidden': 'true' },
+    el('svg:path', { d: STATUS_ICON[kind], fill: kind === 'neutral' ? 'var(--text-muted)' : `var(--${kind})` }));
+  const pill = (kind, label) => el('span', { class: 'pill' }, icon(kind), label);
+  const swatch = (color) => el('span', { class: 'swatch', style: `background:${color}` });
+  function table(headers, rows) {
+    return el('table', {},
+      el('thead', {}, el('tr', {}, headers.map((h) => el('th', { class: h.num ? 'num' : null }, h.label)))),
+      el('tbody', {}, rows.map((r) => el('tr', {}, r.map((c, i) => el('td', { class: headers[i].num ? 'num' : null }, c))))));
+  }
+
+  // ---------- Key status ----------
+  // Results of the key checks: [status kind, label]. Critical = the key cannot serve requests.
+  const HEALTH = {
+    out_of_credit: ['critical', 'Out of credit'],
+    invalid_key: ['critical', 'Key invalid or revoked'],
+    billing: ['critical', 'Billing problem'],
+    no_permission: ['critical', 'No permission'],
+    rate_limited: ['warning', 'Rate limited'],
+    upstream_error: ['warning', 'Anthropic error'],
+    unreachable: ['warning', 'Unreachable'],
+    probe_error: ['warning', 'Check failed'],
+  };
+  // Anthropic itself said this key's organization has no credit left (regardless of what went through the gateway).
+  const isOutOfCredit = (k) => !!k.outOfCreditUntil || !!(k.health && k.health.state === 'out_of_credit');
+  // Spend this cycle: Anthropic's exact figure when its cost report accepts the key, else the gateway's estimate.
+  const spentOf = (k) => (k.exactCycleCost !== null && k.exactCycleCost !== undefined ? k.exactCycleCost : k.cycleToDate);
+  function keyStatus(k) {
+    const h = k.health;
+    const code = h && h.httpStatus ? ` (${h.httpStatus})` : '';
+    if (k.outOfCreditUntil) return { kind: 'critical', label: `Out of credit until ${fmtDay(Date.parse(k.outOfCreditUntil))}` };
+    if (h && HEALTH[h.state]) return { kind: HEALTH[h.state][0], label: HEALTH[h.state][1] + (HEALTH[h.state][0] === 'critical' ? code : '') };
+    if (k.keyStatus !== undefined && k.keyStatus !== 200) return { kind: 'critical', label: `Key error (${k.keyStatus})` };
+    if (k.coolingDown) return { kind: 'warning', label: 'Rate limited, paused' };
+    if (k.priority === 1) return { kind: 'good', label: 'In use' };
+    return { kind: 'neutral', label: `Standby (#${k.priority})` };
+  }
+
+  function addMonth(t, renewDay) {
+    const d = new Date(t);
+    const y = d.getUTCFullYear(), m = d.getUTCMonth() + 1;
+    const last = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+    return Date.UTC(y, m, Math.min(renewDay, last));
+  }
+  // Spend the recent daily pace from the soonest-expiring credit first (as the gateway does) and record
+  // what is left in each key when it renews: that credit expires unused.
+  function project(D) {
+    const keys = D.keys.filter((k) => k.renewDay && k.nextRenewal).map((k) => ({
+      slot: k.slot, renewDay: k.renewDay, credit: k.credit, renew: parseDay(k.nextRenewal), unused: null,
+      remaining: isOutOfCredit(k) ? 0 : Math.max(0, k.credit - spentOf(k)),
+    }));
+    if (!keys.length) return { perSlot: {}, total: null };
+    const end = Math.max(...keys.map((k) => k.renew));
+    for (let t = parseDay(D.todayUtc), first = true; t < end; t += DAY, first = false) {
+      for (const k of keys) {
+        if (k.renew === t) {
+          if (k.unused === null) k.unused = k.remaining;
+          k.remaining = k.credit;
+          k.renew = addMonth(k.renew, k.renewDay);
+        }
+      }
+      let spend = D.burnPerDay * (first ? 1 - D.dayFractionElapsed : 1);
+      for (const k of [...keys].sort((a, b) => a.renew - b.renew || a.slot - b.slot)) {
+        const take = Math.min(spend, k.remaining);
+        k.remaining -= take; spend -= take;
+        if (spend <= 0) break;
+      }
+    }
+    const perSlot = {};
+    for (const k of keys) perSlot[k.slot] = k.unused === null ? k.remaining : k.unused;
+    return { perSlot, total: Object.values(perSlot).reduce((a, b) => a + b, 0) };
+  }
+
+  // ---------- Usage rows, ranges and grouping ----------
+  // Row fields (from the gateway): day, slot, client, app, model, requests, errors, input, output, cacheWrite, cacheRead, cost.
+  const F = { day: 0, slot: 1, client: 2, app: 3, model: 4, requests: 5, errors: 6, input: 7, output: 8, cacheWrite: 9, cacheRead: 10, cost: 11 };
+  const DIMS = {
+    key: { label: 'Key', title: 'key', of: (r) => `Key ${r[F.slot]}` },
+    model: { label: 'Model', title: 'model', of: (r) => r[F.model] || 'unknown' },
+    client: { label: 'Gateway key', title: 'gateway key', of: (r) => r[F.client] || KEY_CHECK_APP },
+    app: { label: 'App', title: 'app', of: (r) => r[F.app] || 'untagged' },
+  };
+  const RANGES = [7, 30, 90];
+  const MAX_COLORS = 6; // categorical slots in use; further groups fold into "Other"
+  let state = { days: 30, by: 'key' };
+  try { state = { ...state, ...JSON.parse(localStorage.getItem('claude-usage-dashboard') || '{}') }; } catch {}
+  // A view can also be bookmarked: /dashboard?days=7&by=model
+  const params = new URLSearchParams(location.search);
+  if (params.has('days')) state.days = Number(params.get('days'));
+  if (params.has('by')) state.by = params.get('by');
+  if (!RANGES.includes(state.days)) state.days = 30;
+  if (!DIMS[state.by]) state.by = 'key';
+  const saveState = () => { try { localStorage.setItem('claude-usage-dashboard', JSON.stringify(state)); } catch {} };
+
+  // Colours follow the entity, never its rank in the current view: keys use their slot colour; other groups are
+  // ranked by spend over all loaded data (so changing the range never repaints them), top six coloured.
+  function colorMap(D) {
+    const dim = DIMS[state.by];
+    const map = new Map();
+    if (state.by === 'key') {
+      const slots = new Set([...D.keys.map((k) => k.slot), ...D.rows.map((r) => r[F.slot])]);
+      [...slots].sort((a, b) => a - b).forEach((s) => map.set(`Key ${s}`, s <= 6 ? `var(--series-${s})` : 'var(--other)'));
+      return map;
+    }
+    const totals = new Map();
+    for (const r of D.rows) totals.set(dim.of(r), (totals.get(dim.of(r)) || 0) + r[F.cost]);
+    [...totals.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .forEach(([name], i) => map.set(name, i < MAX_COLORS ? `var(--series-${i + 1})` : 'var(--other)'));
+    return map;
+  }
+  const groupOf = (name, colors) => (colors.get(name) === 'var(--other)' ? 'Other' : name);
+
+  function sumRows(rows) {
+    const t = { requests: 0, errors: 0, input: 0, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 };
+    for (const r of rows) {
+      if (r[F.app] !== KEY_CHECK_APP) { t.requests += r[F.requests]; t.errors += r[F.errors]; }
+      t.input += r[F.input]; t.output += r[F.output]; t.cacheWrite += r[F.cacheWrite]; t.cacheRead += r[F.cacheRead]; t.cost += r[F.cost];
+    }
+    return t;
+  }
+  function rangeDays(D, days, offset = 0) {
+    const end = parseDay(D.todayUtc) - offset * days * DAY;
+    return Array.from({ length: days }, (_, i) => isoDay(end - (days - 1 - i) * DAY));
+  }
+  const inDays = (D, days) => { const set = new Set(days); return D.rows.filter((r) => set.has(r[F.day])); };
+
+  // Cost by token type at each model's base prices (approximate: cache writes at the 5-minute rate; fast mode,
+  // US-only inference and web search are left in "other"). Savings: cache reads instead of full-price input.
+  function tokenCosts(D, rows) {
+    const c = { input: 0, cacheWrite: 0, cacheRead: 0, output: 0, readSavings: 0, writePremium: 0, total: 0 };
+    for (const r of rows) {
+      c.total += r[F.cost];
+      const p = D.prices[r[F.model]];
+      if (!p) continue;
+      c.input += r[F.input] * p[0] / 1e6;
+      c.cacheWrite += r[F.cacheWrite] * p[1] / 1e6;
+      c.cacheRead += r[F.cacheRead] * p[3] / 1e6;
+      c.output += r[F.output] * p[4] / 1e6;
+      c.readSavings += r[F.cacheRead] * (p[0] - p[3]) / 1e6;
+      c.writePremium += r[F.cacheWrite] * (p[1] - p[0]) / 1e6;
+    }
+    c.other = Math.max(0, c.total - c.input - c.cacheWrite - c.cacheRead - c.output);
+    return c;
+  }
+
+  // ---------- Small charts ----------
+  function sparkline(values) {
+    const W = 200, H = 28, n = values.length, max = Math.max(...values, 0);
+    if (n < 2 || max <= 0) return null;
+    const x = (i) => (i / (n - 1)) * W, y = (v) => H - 2 - (v / max) * (H - 4);
+    const line = values.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join('');
+    return el('svg:svg', { class: 'spark', viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: 'none', 'aria-hidden': 'true' },
+      el('svg:path', { d: `${line}L${W},${H}L0,${H}Z`, fill: 'var(--meter-fill)', 'fill-opacity': 0.1, stroke: 'none' }),
+      el('svg:path', { d: line, fill: 'none', stroke: 'var(--meter-fill)', 'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round', 'vector-effect': 'non-scaling-stroke' }));
+  }
+  const tile = (label, value, note, spark) => el('div', { class: 'card' },
+    el('div', { class: 'kpi-label' }, label), el('div', { class: 'kpi-value' }, value),
+    note ? el('div', { class: 'kpi-note' }, note) : null, spark || null);
+  function change(now, before, days) {
+    if (before <= 0) return now > 0 ? `no usage in the ${days} days before` : '';
+    const d = (now - before) / before;
+    if (Math.abs(d) < 0.005) return `same as the previous ${days} days`;
+    return `${d > 0 ? '▲' : '▼'} ${Math.round(Math.abs(d) * 100)}% vs previous ${days} days`;
+  }
+  function niceStep(maxValue) {
+    const raw = maxValue > 0 ? maxValue / 4 : 0.25;
+    const p = Math.pow(10, Math.floor(Math.log10(raw)));
+    for (const m of [1, 2, 5, 10]) if (m * p >= raw) return m * p;
+    return 10 * p;
+  }
+  const tickLabel = (v, step) => '$' + v.toFixed(Math.max(0, -Math.floor(Math.log10(step))));
+
+  let D = null; // the data currently shown
+  let view = null; // the derived chart data for the current range / grouping
+
+  function drawChart() {
+    const host = $('chart');
+    host.querySelector('svg')?.remove();
+    const { days, series, perDay } = view;
+    const W = host.clientWidth || 800, H = 240, m = { l: 52, r: 8, t: 18, b: 26 };
+    const pw = W - m.l - m.r, ph = H - m.t - m.b;
+    const svg = el('svg:svg', { viewBox: `0 0 ${W} ${H}`, height: H, role: 'img', 'aria-label': `Daily estimated spend for the last ${days.length} days, stacked by ${DIMS[state.by].title}` });
+    const totals = perDay.map((g) => [...g.values()].reduce((a, b) => a + b, 0));
+    const step = niceStep(Math.max(...totals, 0));
+    const ticks = Math.max(1, Math.ceil(Math.max(...totals, 0) / step - 1e-9));
+    const max = step * ticks;
+    const y = (v) => m.t + ph - (v / max) * ph;
+    for (let i = 0; i <= ticks; i++) {
+      const v = step * i;
+      svg.append(el('svg:line', { x1: m.l, x2: W - m.r, y1: y(v), y2: y(v), stroke: i === 0 ? 'var(--baseline)' : 'var(--grid)', 'stroke-width': 1, 'shape-rendering': 'crispEdges' }));
+      svg.append(el('svg:text', { x: m.l - 8, y: y(v) + 4, 'text-anchor': 'end' }, tickLabel(v, step)));
+    }
+    if (!totals.some((t) => t > 0)) {
+      svg.append(el('svg:text', { x: m.l + pw / 2, y: m.t + ph / 2, 'text-anchor': 'middle', class: 'cap' }, `No spend in the last ${days.length} days`));
+    }
+    const band = pw / days.length, bw = Math.min(24, band * 0.62);
+    // Date labels at least ~64px apart (fewer on a phone), on a round day step; the latest day always gets one.
+    const LABEL_GAP = 64;
+    const labelEvery = [1, 2, 3, 5, 7, 10, 15, 30, 45].find((n) => n * band >= LABEL_GAP) || 45;
+    const maxIdx = totals.indexOf(Math.max(...totals));
+    days.forEach((day, i) => {
+      const cx = m.l + band * i + band / 2, x = cx - bw / 2;
+      const hit = el('svg:rect', { class: 'hit', x: m.l + band * i, y: m.t, width: band, height: ph, tabindex: 0,
+        'aria-label': `${fmtDay(parseDay(day))}: ${usd(totals[i])}` });
+      svg.append(hit);
+      let base = 0;
+      const segs = series.map((s) => ({ s, v: perDay[i].get(s.name) || 0 })).filter((g) => g.v > 0);
+      segs.forEach((g, j) => {
+        const top = j === segs.length - 1;
+        const y0 = y(base), y1 = y(base + g.v);
+        const gap = j > 0 ? 2 : 0; // surface gap between stacked segments
+        const h = Math.max(0, y0 - y1 - gap);
+        base += g.v;
+        if (h <= 0) return;
+        const r = top ? Math.min(4, h, bw / 2) : 0;
+        const yb = y0 - gap, yt = yb - h;
+        const path = r ? `M${x},${yb}V${yt + r}Q${x},${yt} ${x + r},${yt}H${x + bw - r}Q${x + bw},${yt} ${x + bw},${yt + r}V${yb}Z`
+                       : `M${x},${yb}V${yt}H${x + bw}V${yb}Z`;
+        svg.append(el('svg:path', { d: path, fill: g.s.color, 'pointer-events': 'none' }));
+      });
+      if (i === maxIdx && totals[i] > 0) svg.append(el('svg:text', { x: cx, y: y(totals[i]) - 5, 'text-anchor': 'middle', class: 'cap' }, usd(totals[i])));
+      const last = i === days.length - 1;
+      if (last || (i % labelEvery === 0 && (days.length - 1 - i) * band >= LABEL_GAP)) {
+        svg.append(el('svg:text', { x: cx, y: H - 8, 'text-anchor': 'middle' }, fmtDay(parseDay(day))));
+      }
+      const show = () => showTip(day, i, totals[i], cx);
+      hit.addEventListener('pointerenter', show); hit.addEventListener('focus', show);
+      hit.addEventListener('pointerleave', hideTip); hit.addEventListener('blur', hideTip);
+    });
+    host.prepend(svg);
+  }
+  function showTip(day, i, total, cx) {
+    const tip = $('tooltip');
+    tip.replaceChildren(el('div', { class: 't-date' }, fmtDay(parseDay(day)) + ' (UTC)'));
+    for (const s of [...view.series].reverse()) {
+      const v = view.perDay[i].get(s.name) || 0;
+      if (v > 0) tip.append(el('div', { class: 'row' }, el('span', { class: 'key', style: `background:${s.color}` }), el('span', { class: 'v' }, usd(v)), el('span', { class: 'n' }, s.name)));
+    }
+    tip.append(el('div', { class: 'row total' }, el('span', { class: 'key' }), el('span', { class: 'v' }, usd(total)), el('span', { class: 'n' }, 'Total')));
+    tip.style.display = 'block';
+    const hostW = $('chart').clientWidth, tw = tip.offsetWidth;
+    tip.style.left = Math.max(0, Math.min(hostW - tw, cx + 14)) + 'px';
+    tip.style.top = '8px';
+  }
+  function hideTip() { $('tooltip').style.display = 'none'; }
+
+  function syncedLine() {
+    if (!D.live) return `Snapshot from ${D.generatedLocal || localTime(D.generatedAt)} · today is ${fmtDay(parseDay(D.todayUtc))} UTC`;
+    const checks = D.keys.map((k) => k.health && k.health.checkedAt).filter(Boolean).sort();
+    const checked = checks.length ? ` · keys checked ${ago(checks[checks.length - 1])}` : ' · keys not checked yet';
+    return `Updated ${localTime(D.generatedAt)} · refreshes every minute${checked}`;
+  }
+
+  function segmented(container, options, current, onPick) {
+    container.replaceChildren(...options.map(([value, label]) => {
+      const b = el('button', { type: 'button', 'aria-pressed': String(value === current) }, label);
+      b.addEventListener('click', () => onPick(value));
+      return b;
+    }));
+  }
+
+  // ---------- Render ----------
+  function renderCredit() {
+    const proj = project(D);
+    const statuses = new Map(D.keys.map((k) => [k.slot, keyStatus(k)]));
+    const down = D.keys.filter((k) => statuses.get(k.slot).kind === 'critical');
+    const warn = D.keys.filter((k) => statuses.get(k.slot).kind === 'warning');
+    const left = D.keys.reduce((a, k) => a + (k.renewDay ? (isOutOfCredit(k) ? 0 : Math.max(0, k.credit - spentOf(k))) : 0), 0);
+    const pool = D.keys.filter((k) => k.renewDay).reduce((a, k) => a + k.credit, 0);
+
+    // Rolling 24-hour spending cap (the gateway pauses requests at the cap).
+    const cap = D.cap || { limit: 0, spent24h: 0 };
+    const capShare = cap.limit ? cap.spent24h / cap.limit : 0;
+    const capHit = cap.limit > 0 && capShare >= 1;
+    const capNear = cap.limit > 0 && !capHit && capShare >= 0.8;
+
+    $('synced').textContent = syncedLine();
+    document.title = capHit ? '⛔ Spending cap reached · Claude credit usage'
+      : down.length ? `⚠ ${down.length} key${down.length > 1 ? 's' : ''} down · Claude credit usage` : 'Claude credit usage';
+    $('overall').replaceChildren(down.length || capHit ? '' : capNear ? pill('warning', `${pct(capShare)} of daily cap used`)
+      : warn.length ? pill('warning', `${D.keys.length - warn.length} of ${D.keys.length} keys OK`)
+      : pill('good', `All ${D.keys.length} keys OK`));
+
+    // Anthropic's own status page: tells an Anthropic-side problem apart from a problem with your keys.
+    const st = D.anthropicStatus;
+    const API_STATE = { operational: ['good', 'operational'], degraded_performance: ['warning', 'degraded'],
+      partial_outage: ['critical', 'partial outage'], major_outage: ['critical', 'major outage'], under_maintenance: ['warning', 'maintenance'] };
+    const apiState = st && st.api ? API_STATE[st.api] || ['warning', st.api.replace(/_/g, ' ')] : null;
+    $('anthropic').replaceChildren(apiState
+      ? el('a', { class: 'pill', href: st.url, target: '_blank', rel: 'noopener noreferrer', title: `Anthropic status page: ${st.description}` },
+          icon(apiState[0]), `Anthropic API ${apiState[1]}`)
+      : '');
+    const incidents = st && st.incidents ? st.incidents : [];
+    $('incident').hidden = incidents.length === 0;
+    if (incidents.length) {
+      $('incident').replaceChildren(icon('warning'), el('div', {}, 'Anthropic reports: ',
+        ...incidents.map((i, n) => [n ? '; ' : '', i.url ? el('a', { href: i.url, target: '_blank', rel: 'noopener noreferrer' }, i.name) : i.name,
+          ` (${i.status}${i.impact && i.impact !== 'none' ? `, ${i.impact} impact` : ''})`]).flat(),
+        '. Errors from your keys may come from this rather than from the keys themselves.'));
+    }
+
+    const banner = $('banner');
+    banner.hidden = down.length === 0 && !capHit;
+    if (!banner.hidden) {
+      const allDown = down.length === D.keys.length;
+      const headline = capHit
+        ? (down.length ? `Daily spending cap reached, and ${down.length} key${down.length > 1 ? 's' : ''} can't be used.` : 'Daily spending cap reached: new requests are paused.')
+        : allDown ? 'No key can be used: requests through the gateway will fail.'
+        : `${down.length} key${down.length > 1 ? 's' : ''} can't be used. Requests are going to your other keys.`;
+      const items = down.map((k) => `Key ${k.slot}: ${statuses.get(k.slot).label}` + (k.health && k.health.message ? ` - ${k.health.message}` : ''));
+      if (capHit) items.unshift(`About ${usd(cap.spent24h)} spent in the last 24 hours (cap ${usd(cap.limit)}). Requests resume automatically as older spending leaves the 24-hour window; raise DAILY_SPEND_CAP_USD to lift it sooner.`);
+      banner.replaceChildren(icon('critical', 18), el('div', {}, el('strong', {}, headline), el('ul', {}, items.map((t) => el('li', {}, t)))));
+    }
+
+    const capFill = capHit ? 'var(--critical)' : capNear ? 'var(--warning)' : 'var(--meter-fill)';
+    const capTile = tile('Last 24 hours', usd(cap.spent24h),
+      cap.limit ? `${pct(capShare)} of the ${usd(cap.limit)} spending cap` : 'no spending cap set');
+    if (cap.limit) capTile.append(el('div', { class: 'meter', role: 'meter', 'aria-valuemin': 0, 'aria-valuemax': cap.limit,
+      'aria-valuenow': cap.spent24h.toFixed(2), 'aria-label': 'Spending in the last 24 hours against the cap', style: 'margin-top:10px' },
+      el('div', { style: `width:${Math.min(100, capShare * 100)}%;background:${capFill}` })));
+    // The credit that renews next, and the daily spend that would use all of it before it expires.
+    const dated = D.keys.filter((k) => k.renewDay && k.nextRenewal);
+    let nextTile = tile('Next credit renewal', '—', 'no renewal days set');
+    if (dated.length) {
+      const next = dated.map((k) => k.nextRenewal).sort()[0];
+      const group = dated.filter((k) => k.nextRenewal === next).sort((a, b) => a.slot - b.slot);
+      const leftNext = group.reduce((a, k) => a + (isOutOfCredit(k) ? 0 : Math.max(0, k.credit - spentOf(k))), 0);
+      const daysToGo = Math.max(0.25, (parseDay(next) - Date.parse(D.generatedAt)) / DAY);
+      const names = group.map((k) => `Key ${k.slot}`).join(', ');
+      nextTile = tile('Next credit renewal', fmtDay(parseDay(next)), leftNext >= 0.01
+        ? `${names}: ${usd(leftNext)} left, expiring in ${daysToGo < 1 ? 'under a day' : `${Math.round(daysToGo)} day${Math.round(daysToGo) === 1 ? '' : 's'}`}. About ${usd(leftNext / daysToGo)}/day would use it all.`
+        : `${names}: credit fully used.`);
+    }
+    $('credit-kpis').replaceChildren(
+      tile('Credit left this cycle', usd(left), `of ${usd(pool)} across ${D.keys.filter((k) => k.renewDay).length} keys`),
+      tile('Projected to expire unused', proj.total === null ? '—' : usd(proj.total), `if spending stays at ${usd(D.burnPerDay)}/day (7-day average)`),
+      nextTile,
+      capTile,
+    );
+    const every = D.checkIntervalMinutes || 60;
+    $('credit-sub').textContent = 'Requests use the key whose credit expires soonest until it runs out or fails. ' +
+      `Keys are checked automatically about every ${every % 60 ? `${every} minutes` : every === 60 ? 'hour' : `${every / 60} hours`} ` +
+      '(when the gateway is used or this page is open), and right away when a request runs into a problem.';
+    // Whether Anthropic's cost report (exact spend) accepts the keys; it normally needs an Admin API key.
+    const cr = D.costReport || {};
+    const exactSlots = Object.entries(cr).filter(([, s]) => s === 200).map(([s]) => s);
+    $('cost-note').textContent = !Object.keys(cr).length ? ''
+      : exactSlots.length ? `Spend for Key ${exactSlots.join(', ')} comes from Anthropic's cost report.`
+      : "Anthropic's cost report doesn't accept these keys (it needs an Admin API key, which individual accounts can't create), so spend is estimated.";
+    const pr = D.pricing;
+    $('pricing-note').textContent = !pr ? "Amounts are estimates from Anthropic's published prices"
+      : pr.fetchedAt ? `Amounts are estimates from Anthropic's pricing page (prices read ${fmtDay(Date.parse(pr.fetchedAt))}, checked daily${pr.error ? `; the latest check failed: ${pr.error}` : ''})`
+      : `Amounts are estimates from the gateway's built-in price list${pr.error ? ` (reading Anthropic's pricing page failed: ${pr.error})` : ''}`;
+    $('alerts-note').textContent = D.alertsEnabled
+      ? 'Phone alerts are on (ntfy): keys that stop working or come back, and the spending cap.'
+      : 'Phone alerts are off.';
+
+    // One row per key (a small card on phones).
+    const head = el('div', { class: 'krow khead', 'aria-hidden': 'true' },
+      el('div', {}, 'Key'), el('div', {}, 'Used this cycle'), el('div', {}, 'Renews'),
+      el('div', { class: 'num' }, 'Projected unused'), el('div', { class: 'num' }, 'Today'), el('div', {}, 'Last check'));
+    $('keys').replaceChildren(head, ...[...D.keys].sort((a, b) => a.slot - b.slot).map((k) => {
+      const st = statuses.get(k.slot);
+      // Out of credit: the meter is full whatever the gateway's own estimate says, because the rest of the credit
+      // was spent outside the gateway (other API keys or apps in the same organization).
+      const empty = isOutOfCredit(k);
+      const spent = spentOf(k);
+      const used = empty ? Math.max(k.credit, spent) : spent;
+      const outside = empty ? k.credit - k.cycleToDate : 0;
+      const width = k.credit ? Math.min(100, (used / k.credit) * 100) : 0;
+      let message = null;
+      if (empty) {
+        message = outside >= 1
+          ? `Anthropic says this key's credit is used up. ${usd(k.cycleToDate)} of it went through the gateway; about ${usd(outside)} was used outside it (other keys or apps in this organization).`
+          : "Anthropic says this key's credit is used up.";
+      } else if (k.health && k.health.state !== 'ok' && k.health.message) {
+        message = `Anthropic: ${k.health.message}`;
+      }
+      const checkText = k.health
+        ? `${k.health.state === 'ok' ? 'OK' : (HEALTH[k.health.state] || ['', k.health.state])[1]} · ${ago(k.health.checkedAt)}`
+        : 'not checked yet';
+      return el('div', { class: 'krow' },
+        el('div', { class: 'kname' },
+          el('div', { class: 'kline' }, swatch(`var(--series-${k.slot})`), `Key ${k.slot}`, pill(st.kind, st.label)),
+          el('div', { class: 'org', title: k.limits ? `Rate limits for ${k.limits.model}: ${k.limits.rpm.toLocaleString('en-US')} requests, ${compact(k.limits.itpm || 0)} input tokens and ${compact(k.limits.otpm || 0)} output tokens per minute` +
+            (k.tier && k.tier.spendCapUsd ? `; ${k.tier.name} tier monthly spend cap ${usd(k.tier.spendCapUsd)}` : '') : null },
+            [k.orgId ? `org ${k.orgId}…` : null, k.tier ? `${k.tier.name} tier` : null,
+             k.limits ? `${k.limits.rpm.toLocaleString('en-US')} RPM` : null].filter(Boolean).join(' · '))),
+        el('div', { class: 'kused', 'data-label': 'Used this cycle' },
+          el('div', {}, el('span', { class: 'amount' }, usd(used)), el('span', { class: 'muted' }, ` of ${usd(k.credit)}`)),
+          el('div', { class: 'meter', role: 'meter', 'aria-valuemin': 0, 'aria-valuemax': k.credit, 'aria-valuenow': used.toFixed(2),
+            'aria-label': `Key ${k.slot} credit used` }, el('div', { style: `width:${width}%` }))),
+        el('div', { 'data-label': 'Renews' }, k.renewDay
+          ? `${fmtDay(parseDay(k.nextRenewal))} · in ${k.daysLeft} day${k.daysLeft === 1 ? '' : 's'}` : 'not set'),
+        el('div', { class: 'num', 'data-label': 'Projected unused' }, k.renewDay ? usd(proj.perSlot[k.slot] ?? 0) : '—'),
+        el('div', { class: 'num', 'data-label': 'Today' }, usd(k.today)),
+        el('div', { 'data-label': 'Last check' }, checkText),
+        message ? el('p', { class: 'kmsg' }, message) : null);
+    }));
+  }
+
+  function renderUsage() {
+    const dim = DIMS[state.by];
+    const days = rangeDays(D, state.days);
+    const rows = inDays(D, days);
+    const prevRows = inDays(D, rangeDays(D, state.days, 1));
+    const now = sumRows(rows), before = sumRows(prevRows);
+    const colors = colorMap(D);
+
+    segmented($('range'), RANGES.map((d) => [d, `${d} days`]), state.days, (v) => { state.days = v; saveState(); renderUsage(); });
+    segmented($('groupby'), Object.entries(DIMS).map(([k, d]) => [k, d.label]), state.by, (v) => { state.by = v; saveState(); renderUsage(); });
+
+    // --- Range tiles
+    const byDay = (pick) => days.map((day) => rows.filter((r) => r[F.day] === day).reduce((a, r) => a + pick(r), 0));
+    const costs = tokenCosts(D, rows);
+    const prompt = now.input + now.cacheWrite + now.cacheRead;
+    const ok = now.requests - now.errors;
+    $('range-kpis').replaceChildren(
+      tile(`Spend, last ${state.days} days`, usd(now.cost), change(now.cost, before.cost, state.days), sparkline(byDay((r) => r[F.cost]))),
+      tile('Requests', now.requests.toLocaleString('en-US'),
+        now.requests ? `${now.errors.toLocaleString('en-US')} failed (${pct(now.errors / now.requests)})` : 'none in this period',
+        sparkline(byDay((r) => (r[F.app] === KEY_CHECK_APP ? 0 : r[F.requests])))),
+      tile('Saved by prompt caching', usd(costs.readSavings - costs.writePremium),
+        prompt ? `${pct(now.cacheRead / prompt)} of prompt tokens came from the cache` : 'no prompts in this period'),
+      tile('Average per request', ok ? usd(now.cost / ok) : '—', `${usd(now.cost / state.days)}/day on average`),
+    );
+
+    // --- Daily chart, stacked by the chosen grouping
+    const names = new Set();
+    const perDay = days.map((day) => {
+      const g = new Map();
+      for (const r of rows) {
+        if (r[F.day] !== day) continue;
+        const name = groupOf(dim.of(r), colors);
+        names.add(name);
+        g.set(name, (g.get(name) || 0) + r[F.cost]);
+      }
+      return g;
+    });
+    const order = [...colors.keys()].map((n) => groupOf(n, colors)).filter((n, i, a) => a.indexOf(n) === i);
+    const series = order.filter((n) => names.has(n)).map((name) => ({ name, color: name === 'Other' ? 'var(--other)' : colors.get(name) }));
+    view = { days, series, perDay };
+    $('chart-title').textContent = `Daily spend by ${dim.title}`;
+    $('legend').replaceChildren(...series.map((s) => el('span', {}, swatch(s.color), s.name)));
+    drawChart();
+    $('daily-table').replaceChildren(table(
+      [{ label: 'Date (UTC)' }, ...series.map((s) => ({ label: s.name, num: true })), { label: 'Total', num: true }],
+      [...days].map((day, i) => [day, ...series.map((s) => usd(perDay[i].get(s.name) || 0)),
+        usd([...perDay[i].values()].reduce((a, b) => a + b, 0))]).reverse()));
+
+    // --- Breakdown table
+    $('breakdown-title').textContent = `By ${dim.title}, last ${state.days} days`;
+    const groups = new Map();
+    for (const r of rows) {
+      const name = dim.of(r);
+      if (!groups.has(name)) groups.set(name, []);
+      groups.get(name).push(r);
+    }
+    const list = [...groups.entries()].map(([name, rs]) => ({ name, ...sumRows(rs) })).sort((a, b) => b.cost - a.cost);
+    if (!list.length) {
+      $('breakdown').replaceChildren(el('div', { class: 'empty' }, 'No usage in this period.'));
+    } else {
+      $('breakdown').replaceChildren(table(
+        [{ label: dim.label }, { label: 'Requests', num: true }, { label: 'Est. cost', num: true }, { label: 'Share', num: true },
+         { label: 'Per request', num: true }, { label: 'Cache hit', num: true }],
+        list.map((g) => {
+          const p = g.input + g.cacheWrite + g.cacheRead;
+          const okReq = g.requests - g.errors;
+          const rebuilt = g.cacheWrite > 0 && g.cacheRead < g.cacheWrite;
+          return [
+            el('span', { class: 'name' }, swatch(colors.get(g.name) || 'var(--other)'), g.name,
+              rebuilt ? el('span', { class: 'note', title: 'More tokens were written to the prompt cache than read back: the cache is rebuilt more than reused.' }, icon('warning')) : null),
+            g.requests ? g.requests.toLocaleString('en-US') : '—',
+            usd(g.cost), now.cost ? pct(g.cost / now.cost) : '—',
+            okReq > 0 ? usd(g.cost / okReq) : '—',
+            p ? pct(g.cacheRead / p) : '—',
+          ];
+        })));
+    }
+
+    // --- Where the money goes
+    const parts = [
+      ['Input', costs.input, now.input, 'var(--series-1)'],
+      ['Cache writes', costs.cacheWrite, now.cacheWrite, 'var(--series-2)'],
+      ['Cache reads', costs.cacheRead, now.cacheRead, 'var(--series-3)'],
+      ['Output', costs.output, now.output, 'var(--series-4)'],
+      ['Other (search, fast mode…)', costs.other, null, 'var(--other)'],
+    ].filter((p) => p[1] > 0.0000005);
+    const totalParts = parts.reduce((a, p) => a + p[1], 0);
+    if (!totalParts) {
+      $('tokens').replaceChildren(el('div', { class: 'empty' }, 'No spend in this period.'));
+    } else {
+      const net = costs.readSavings - costs.writePremium;
+      $('tokens').replaceChildren(
+        el('div', { class: 'split', role: 'img', 'aria-label': parts.map((p) => `${p[0]} ${usd(p[1])}`).join(', ') },
+          // Grow by percentage share: raw dollar amounts under 1 in total would leave part of the bar empty.
+          parts.map((p) => el('div', { style: `flex:${(p[1] / totalParts) * 100} 1 0;background:${p[3]}`, title: `${p[0]}: ${usd(p[1])}` }))),
+        table([{ label: '' }, { label: 'Cost', num: true }, { label: 'Share', num: true }, { label: 'Tokens', num: true }],
+          parts.map((p) => [el('span', { class: 'name' }, swatch(p[3]), p[0]), usd(p[1]), pct(p[1] / totalParts), p[2] === null ? '—' : compact(p[2])])),
+        el('div', { class: 'savings' },
+          el('div', { class: 'line' }, el('span', {}, 'Cache reads saved'), el('span', {}, usd(costs.readSavings))),
+          el('div', { class: 'line' }, el('span', {}, 'Cache writes cost extra'), el('span', {}, usd(costs.writePremium))),
+          !costs.readSavings && !costs.writePremium
+            ? el('div', { class: 'net' }, icon('neutral'), el('span', {}, 'No prompt caching in this period.'))
+            : el('div', { class: 'net' }, icon(net >= 0 ? 'good' : 'warning'),
+            el('span', {}, net >= 0
+              ? `Prompt caching saved about ${usd(net)} net in this period.`
+              : `Prompt caching cost about ${usd(-net)} more than it saved: caches are being written but rarely read back. Reuse the same prompt prefix within 5 minutes, or stop caching it.`))));
+    }
+
+    renderHeatmap();
+  }
+
+  // ---------- Activity heatmap: requests by weekday and hour, in the viewer's local time ----------
+  const WEEK = [1, 2, 3, 4, 5, 6, 0]; // Monday first
+  const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const hourName = (h) => (h === 0 ? '12 am' : h < 12 ? `${h} am` : h === 12 ? '12 pm' : `${h - 12} pm`);
+  const hourShort = (h) => (h === 0 ? '12a' : h < 12 ? `${h}a` : h === 12 ? '12p' : `${h - 12}p`);
+  function renderHeatmap() {
+    const host = $('heat');
+    const since = Date.parse(D.generatedAt) - state.days * DAY;
+    const grid = Array.from({ length: 7 }, () => Array.from({ length: 24 }, () => ({ requests: 0, cost: 0 })));
+    for (const [hour, requests, cost] of D.hours || []) {
+      const t = Date.parse(`${hour}:00:00Z`);
+      if (t < since) continue;
+      const local = new Date(t);
+      const cell = grid[local.getDay()][local.getHours()];
+      cell.requests += requests;
+      cell.cost += cost;
+    }
+    const max = Math.max(0, ...grid.flat().map((c) => c.requests));
+    const level = (v) => (v <= 0 || !max ? 0 : Math.min(5, Math.ceil((v / max) * 5)));
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'local time';
+    $('heat-sub').textContent = `Requests through the gateway by weekday and hour over the last ${state.days} days, in your local time (${tz}).`;
+
+    const tip = el('div', { class: 'tooltip', role: 'status' });
+    const cells = [];
+    host.replaceChildren();
+    for (const dow of WEEK) {
+      host.append(el('div', { class: 'day' }, DAY_NAMES[dow]));
+      for (let h = 0; h < 24; h++) {
+        const c = grid[dow][h];
+        const label = `${DAY_NAMES[dow]} ${hourName(h)}–${hourName((h + 1) % 24)}: ${c.requests.toLocaleString('en-US')} request${c.requests === 1 ? '' : 's'}, ${usd(c.cost)}`;
+        const cell = el('div', { class: 'cell', tabindex: 0, 'aria-label': label, style: `background:var(--seq-${level(c.requests)})` });
+        const show = () => {
+          tip.textContent = label;
+          tip.style.display = 'block';
+          const left = cell.offsetLeft + cell.offsetWidth + 6;
+          tip.style.left = Math.max(0, Math.min(host.clientWidth - tip.offsetWidth, left)) + 'px';
+          tip.style.top = Math.max(0, cell.offsetTop - tip.offsetHeight - 6) + 'px';
+        };
+        cell.addEventListener('pointerenter', show); cell.addEventListener('focus', show);
+        cell.addEventListener('pointerleave', () => { tip.style.display = 'none'; });
+        cell.addEventListener('blur', () => { tip.style.display = 'none'; });
+        host.append(cell);
+        if (c.requests) cells.push({ dow, h, ...c });
+      }
+    }
+    host.append(el('div', {}));
+    for (let h = 0; h < 24; h++) host.append(el('div', { class: 'hr' }, h % 3 === 0 ? hourShort(h) : ''));
+    host.append(tip);
+
+    $('heat-scale').replaceChildren('Fewer', ...[1, 2, 3, 4, 5].map((i) => el('span', { class: 'box', style: `background:var(--seq-${i})` })), 'More',
+      el('span', { style: 'margin-left:10px' }, max ? `(darkest = ${max.toLocaleString('en-US')} requests in that hour slot)` : ''));
+    if (!cells.length) {
+      $('heat-summary').textContent = 'No requests in this period.';
+      $('heat-table').replaceChildren();
+      return;
+    }
+    const busiest = cells.reduce((a, b) => (b.requests > a.requests ? b : a));
+    const perDay = WEEK.map((dow) => ({ dow, requests: grid[dow].reduce((a, c) => a + c.requests, 0) }));
+    const topDay = perDay.reduce((a, b) => (b.requests > a.requests ? b : a));
+    $('heat-summary').textContent = `Busiest hour: ${DAY_NAMES[busiest.dow]} ${hourName(busiest.h)} (${busiest.requests.toLocaleString('en-US')} requests). Busiest day: ${DAY_NAMES[topDay.dow]}.`;
+    $('heat-table').replaceChildren(table(
+      [{ label: 'Day' }, { label: 'Hour (local)' }, { label: 'Requests', num: true }, { label: 'Est. cost', num: true }],
+      cells.sort((a, b) => b.requests - a.requests).slice(0, 10)
+        .map((c) => [DAY_NAMES[c.dow], `${hourName(c.h)}–${hourName((c.h + 1) % 24)}`, c.requests.toLocaleString('en-US'), usd(c.cost)])));
+  }
+
+  // ---------- Models the keys can use (Models API, refreshed daily) ----------
+  function renderModels() {
+    const models = D.models || [];
+    const keyCount = D.keys.length;
+    $('models-sub').textContent = models.length
+      ? `From Anthropic's Models API for each key, checked daily${D.discoveredAt ? ` (last ${ago(D.discoveredAt)})` : ''}. Prices per million tokens; new models trigger a phone alert.`
+      : 'Not checked yet: the list appears after the first daily check.';
+    if (!models.length) { $('models').replaceChildren(); return; }
+    // "new": first seen after the gateway started checking, within the last 14 days.
+    const fresh = (m) => !!D.discoveredSince && m.firstSeen > D.discoveredSince && Date.parse(D.generatedAt) - parseDay(m.firstSeen) < 14 * DAY;
+    const tokens = (v) => (v ? compact(v) : '—');
+    $('models').replaceChildren(table(
+      [{ label: 'Model' }, { label: 'ID' }, { label: 'Context', num: true }, { label: 'Max output', num: true },
+       { label: 'Input', num: true }, { label: 'Output', num: true }, { label: 'Keys' }],
+      models.map((m) => [
+        el('span', {}, m.name, fresh(m) ? el('span', { class: 'badge' }, 'new') : null),
+        el('span', { class: 'mono' }, m.id),
+        tokens(m.maxInput), tokens(m.maxOutput),
+        m.price ? usd(m.price[0]) : '—', m.price ? usd(m.price[4]) : '—',
+        m.keys.length >= keyCount ? 'all' : m.keys.map((s) => `Key ${s}`).join(', '),
+      ])));
+  }
+
+  function renderErrors() {
+    if (!D.errors.length) {
+      $('errors').replaceChildren(el('div', { class: 'empty' }, 'No failed requests recorded.'));
+    } else {
+      $('errors').replaceChildren(table(
+        [{ label: 'Time (local)' }, { label: 'Key slot', num: true }, { label: 'Gateway key' }, { label: 'App' }, { label: 'Model' }, { label: 'Status', num: true }, { label: 'Error' }],
+        D.errors.map((e) => [e.time ? localTime(e.time) : e.timeLocal, String(e.slot), e.client || '—', e.app || 'untagged', e.model || 'unknown', String(e.status), e.errorType || '—'])));
+    }
+  }
+
+  function render(data) {
+    D = data;
+    renderCredit();
+    renderUsage();
+    renderModels();
+    renderErrors();
+  }
+
+  let resizeTimer;
+  window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => view && drawChart(), 100); });
+
+  // The offline copy (usage\report.html) shows its saved snapshot first, then switches to live numbers from the
+  // gateway whenever this computer is online, falling back to the snapshot when it isn't.
+  if (DATA) render(DATA);
+  const base = DATA ? String(DATA.liveUrl || '').replace(/\/$/, '') : '';
+  if (DATA && !base) return;
+
+  // ---------- Live mode ----------
+  let lastLoad = 0;
+  async function load(path, options) {
+    if (!DATA) $('main').classList.add('stale');
+    try {
+      const r = await fetch(base + path, { cache: 'no-store', credentials: DATA ? 'omit' : 'same-origin', ...options });
+      if (r.status === 401 && !DATA) { location.reload(); return; }
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      render(await r.json());
+      lastLoad = Date.now();
+      updateCheck();
+    } catch (err) {
+      $('synced').textContent = DATA && !lastLoad
+        ? `${syncedLine()} · offline: showing the saved snapshot, retrying every minute`
+        : (D ? syncedLine() + ' · ' : '') + `Could not refresh (${err.message}); retrying in a minute.`;
+    } finally {
+      $('main').classList.remove('stale');
+    }
+  }
+  // "Check keys now" is shared by everyone who opens the page: one real check per cooldown (the gateway enforces it
+  // too), so the button waits out the cooldown and says when it is available again.
+  const check = $('check');
+  check.hidden = !!DATA; // the offline copy only reads; checks are run from the online page
+  let checking = false;
+  function updateCheck() {
+    if (checking || !D || DATA) return;
+    const cooldown = (D.checkCooldownMinutes || 5) * 60000;
+    const latest = Math.max(0, ...D.keys.map((k) => (k.health ? Date.parse(k.health.checkedAt) : 0)));
+    const wait = latest + cooldown - Date.now();
+    check.disabled = wait > 0;
+    check.textContent = wait > 0 ? `Check keys now (in ${Math.ceil(wait / 60000)} min)` : 'Check keys now';
+    check.title = wait > 0 ? `Keys were checked ${ago(new Date(latest).toISOString())}; one check every ${cooldown / 60000} minutes.` : '';
+  }
+  check.addEventListener('click', async () => {
+    checking = true;
+    check.disabled = true;
+    check.textContent = 'Checking…';
+    await load('/dashboard/check', { method: 'POST' });
+    checking = false;
+    updateCheck();
+  });
+  setInterval(updateCheck, 15000);
+  setInterval(() => { if (document.visibilityState === 'visible') load('/dashboard/data'); }, REFRESH_MS);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && Date.now() - lastLoad > REFRESH_MS) load('/dashboard/data');
+  });
+  load('/dashboard/data');
+})();
+</script>
+</body>
+</html>

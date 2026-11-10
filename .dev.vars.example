@@ -1,0 +1,18 @@
+# Local development only: copy to .dev.vars (git-ignored) for `npm run dev`. Production secrets live in Cloudflare
+# (npx wrangler secret put ...) and are never needed here.
+#
+# With the fake Anthropic API running (`npm run mock`, see DEVELOPMENT.md) these fake keys exercise every path
+# without real credentials or credit:
+#   sk-good-*   works        sk-broke   out of credit (until toggled)        sk-revoked   401
+GATEWAY_KEY=local-dev-gateway-key
+GATEWAY_KEY_PHONE=local-dev-phone-key
+ANTHROPIC_KEY_1=sk-good-one
+ANTHROPIC_KEY_2=sk-broke
+ANTHROPIC_KEY_3=sk-revoked
+UPSTREAM_ORIGIN=http://127.0.0.1:8798
+NTFY_TOPIC=local-test
+NTFY_SERVER=http://127.0.0.1:8798/__ntfy
+
+# Optional, to try other paths:
+# DAILY_SPEND_CAP_USD=0.05
+# DASHBOARD_KEY=local-dev-dashboard-key
