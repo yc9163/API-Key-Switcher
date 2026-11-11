@@ -20,8 +20,9 @@ knowing next time (a new key, a changed renewal day, a decision, a new idea) bel
 | `usage\` CSVs and `report.html` | On each Windows PC that runs `sync-usage.ps1`; copies of D1 | The first sync on a new PC downloads everything again |
 | Automatic usage sync | A scheduled task on each Windows PC (`install-auto-sync.ps1`) | Install it again |
 
-Cloudflare never shows a secret's value again after it is saved. Keep the gateway keys you use and the ntfy topic in a
-password manager.
+None of these values are needed to edit, test or deploy the gateway: that takes only the Cloudflare login (and GitHub to
+push). A lost value is simply replaced, for example with a new gateway key. Cloudflare never shows a secret again, so
+keeping the ones in use in a password manager just saves replacing them.
 
 Only the owner's accounts have access. To add a second maintainer, invite them to the Cloudflare account (Manage
 Account → Members) and as a collaborator on the GitHub repository.
@@ -104,7 +105,7 @@ That holds for one-line settings changes too: a renewal day or the cap edited on
 | A seventh account | Code change: `SLOTS` and `Env` in `src/shared.ts`, a `CREDIT_EXPIRY_DAY_7` in `wrangler.jsonc`, then test against the mock |
 | Give an app, device or person access | Add a gateway key: [ADD-KEYS.md](ADD-KEYS.md), part 1. Revoke it by deleting the secret |
 | Rotate `main` | `npx wrangler secret put GATEWAY_KEY`, then update the apps that use it |
-| Alerts on a new phone | Install ntfy and subscribe to the topic on server `ntfy.sh`. The topic name is in the password manager or `NTFY_TOPIC.txt` on the first PC; if neither has it, make a new random one, `npx wrangler secret put NTFY_TOPIC`, and subscribe every phone to it |
+| Alerts on a new phone | Install ntfy and subscribe to the topic on server `ntfy.sh`. The topic name is shown in the ntfy app of a phone that's already subscribed (or in `NTFY_TOPIC.txt` on the first PC); if none has it, make a new random one, `npx wrangler secret put NTFY_TOPIC`, and subscribe every phone to it |
 | Make the dashboard private | `npx wrangler secret put DASHBOARD_KEY` (README, "Online dashboard") |
 | A deploy broke something | `npx wrangler deployments list` shows recent deployments (a `secret put` also creates one); `npx wrangler rollback <version-id>` returns to the one before the bad deploy. Migrations are additive, so older code still works. Then fix, deploy, push |
 | `npm run migrate` fails with "A request to the Cloudflare API … failed" | Run it again until the migration shows ✅, before deploying |
