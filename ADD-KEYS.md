@@ -2,7 +2,7 @@
 
 网关地址：`https://claude-multi-key-gateway.yunkangchen2017.workers.dev`
 Cloudflare Worker 名字：`claude-multi-key-gateway`
-项目文件夹（第一台电脑）：`C:\Users\YunkangChen\Desktop\api\claude-cloudflare-gateway\claude-cloudflare-gateway`；换电脑见 [HANDOVER.md](HANDOVER.md)
+项目文件夹（第一台电脑）：`C:\Users\YunkangChen\Desktop\api\claude-cloudflare-gateway\claude-cloudflare-gateway`；换电脑见 [HANDOVER.md](HANDOVER.md)。下面命令里的 `cd` 路径是第一台电脑的，在别的电脑上换成你 clone 下来的 `API-Key-Switcher` 文件夹。
 
 ## 先分清要加哪种 key
 
@@ -55,7 +55,7 @@ Cloudflare Worker 名字：`claude-multi-key-gateway`
 
 ### 方法 B：在另一台电脑上用命令行添加
 
-前提：那台电脑装了 Node.js 20 或更新的版本（https://nodejs.org）。不需要项目文件夹。
+前提：那台电脑装了 Node.js 20 或更新的版本（https://nodejs.org）。不需要项目文件夹。（要改代码的话需要 22.18 或更新，见 HANDOVER.md。）
 
 ```bash
 npx wrangler login
@@ -148,7 +148,7 @@ const client = new Anthropic({
 |---|---|
 | `Invalid gateway key`（401） | 名字不是以 `GATEWAY_KEY_` 开头；复制 key 时多了或少了字符；刚加完还没过几秒；这个 key 已经被删除或替换 |
 | key 用了一段时间后突然失效 | 添加时类型选成了 Text（普通变量），部署时被清掉了。用 Secret 类型重新加一次 |
-| `Gateway spending cap reached`（429） | 24 小时内的总花费到了上限，所有 key 共用。想多花一些，就在 `wrangler.jsonc` 里调高 `DAILY_SPEND_CAP_USD`，然后运行 `npx wrangler deploy` |
+| `Gateway spending cap reached`（429） | 24 小时内的总花费到了上限，所有 key 共用。想多花一些，就先 `git pull`，在 `wrangler.jsonc` 里调高 `DAILY_SPEND_CAP_USD`，运行 `npx wrangler deploy`，再 `git push` |
 | `credit balance too low` | 所有账号的额度都用完了，等到续期日恢复；或者是在 Claude Code 里用了网关（不支持，见上面） |
 
 ---
@@ -187,7 +187,7 @@ npx wrangler deploy
 
 ### 加第 7 个及以上的账号
 
-现在代码只支持 6 个位置（`ANTHROPIC_KEY_1` 到 `ANTHROPIC_KEY_6`）。加第 7 个需要改一处代码，并重新部署。
+现在代码只支持 6 个位置（`ANTHROPIC_KEY_1` 到 `ANTHROPIC_KEY_6`）。加第 7 个需要改几处代码并重新部署，见 HANDOVER.md 的 "Common situations"。
 
 ---
 

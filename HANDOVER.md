@@ -23,6 +23,9 @@ knowing next time (a new key, a changed renewal day, a decision, a new idea) bel
 Cloudflare never shows a secret's value again after it is saved. Keep the gateway keys you use and the ntfy topic in a
 password manager.
 
+Only the owner's accounts have access. To add a second maintainer, invite them to the Cloudflare account (Manage
+Account → Members) and as a collaborator on the GitHub repository.
+
 ## Current state (2026-11-11)
 
 - Gateway and public dashboard: https://claude-multi-key-gateway.yunkangchen2017.workers.dev/
@@ -68,6 +71,12 @@ In `wrangler.jsonc`: renewal days as above, `MONTHLY_CREDIT_USD` 200, key checks
 
 ## On a new computer
 
+Accounts needed:
+- Cloudflare: the account that owns the Worker. Keep two-factor sign-in on; it controls everything.
+- GitHub `yc9163`, to push.
+- Only for key work: claude.ai and the Console (platform.claude.com) of the account concerned.
+- Only for alerts: the ntfy app on the phone.
+
 1. Install Node.js 22.18 or newer and Git.
 2. Get the code: `git clone https://github.com/yc9163/API-Key-Switcher.git`, `cd API-Key-Switcher`, `npm install`.
 3. Commit as the GitHub noreply address so no personal email lands in the public history:
@@ -82,21 +91,22 @@ In `wrangler.jsonc`: renewal days as above, `MONTHLY_CREDIT_USD` 200, key checks
    Linux, skip the `.ps1` scripts: the dashboard shows everything they do.
 
 Every time: `git pull` before working, `git push` after deploying. `npm run deploy` publishes whatever this computer has.
+That holds for one-line settings changes too: a renewal day or the cap edited on a stale copy would deploy old code.
 
 ## Common situations
 
 | Situation | What to do |
 |---|---|
 | A key runs out of credit | Nothing. The gateway moves to the next key, the dashboard marks it (full meter, red), the phone gets an alert, and it returns by itself at renewal. If it happens long before renewal, that organization's credit was also used outside the gateway |
-| Phone alert: credit came back on a different day than configured | That key's renewal day changed. Edit `CREDIT_EXPIRY_DAY_N` in `wrangler.jsonc`, `npm run deploy`, commit, push, then update the table above |
-| Requests get `429 Gateway spending cap reached` | The $100 per 24 hours is used up. It clears as older spending leaves the window. To spend more on purpose, e.g. before a renewal, raise `DAILY_SPEND_CAP_USD`, deploy, and lower it again afterwards |
+| Phone alert: credit came back on a different day than configured | That key's renewal day changed. `git pull`, edit `CREDIT_EXPIRY_DAY_N` in `wrangler.jsonc`, `npm run deploy`, update the table above, commit, push |
+| Requests get `429 Gateway spending cap reached` | The $100 per 24 hours is used up. It clears as older spending leaves the window. To spend more on purpose, e.g. before a renewal, `git pull`, raise `DAILY_SPEND_CAP_USD`, deploy, push, and lower it again afterwards |
 | Replace an Anthropic key (revoked, leaked, another account) | `npx wrangler secret put ANTHROPIC_KEY_N`, then "Check keys now" on the dashboard. Console side (turn off auto-reload!): [ADD-KEYS.md](ADD-KEYS.md), part 2 |
 | A seventh account | Code change: `SLOTS` and `Env` in `src/shared.ts`, a `CREDIT_EXPIRY_DAY_7` in `wrangler.jsonc`, then test against the mock |
 | Give an app, device or person access | Add a gateway key: [ADD-KEYS.md](ADD-KEYS.md), part 1. Revoke it by deleting the secret |
 | Rotate `main` | `npx wrangler secret put GATEWAY_KEY`, then update the apps that use it |
-| Alerts on a new phone | Install ntfy, subscribe to the topic on server `ntfy.sh` |
+| Alerts on a new phone | Install ntfy and subscribe to the topic on server `ntfy.sh`. The topic name is in the password manager or `NTFY_TOPIC.txt` on the first PC; if neither has it, make a new random one, `npx wrangler secret put NTFY_TOPIC`, and subscribe every phone to it |
 | Make the dashboard private | `npx wrangler secret put DASHBOARD_KEY` (README, "Online dashboard") |
-| A deploy broke something | `npx wrangler rollback` returns to the previous version (secrets are unaffected; migrations are additive, so older code still works). Fix, deploy, push |
+| A deploy broke something | `npx wrangler deployments list` shows recent deployments (a `secret put` also creates one); `npx wrangler rollback <version-id>` returns to the one before the bad deploy. Migrations are additive, so older code still works. Then fix, deploy, push |
 | `npm run migrate` fails with "A request to the Cloudflare API … failed" | Run it again until the migration shows ✅, before deploying |
 | Dashboard footer says prices couldn't be updated | Anthropic changed its pricing page. The last good prices stay in use; fix `parsePricing` in `src/pricing.ts`, with a test |
 | See what the Worker is doing | `npx wrangler tail` shows live requests and errors (no request bodies) |

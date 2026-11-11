@@ -52,13 +52,15 @@ Nothing that records or checks is allowed to fail or slow down a request: every 
 
 ## Local development
 
-Needs Node.js 22.18 or newer (the tests run TypeScript directly).
+Needs Node.js 22.18 or newer (the tests run TypeScript directly). The commands below are for a bash shell: on Windows,
+use Git Bash (installed with Git). The `npm` commands also work in PowerShell; there, use `curl.exe` instead of `curl`
+(in Windows PowerShell `curl` is a different command) and `Remove-Item -Recurse -Force` instead of `rm -rf`.
 
 ```bash
 npm install
 cp .dev.vars.example .dev.vars   # fake keys, pointed at the mock; git-ignored
-npm run mock                     # terminal 1: fake Anthropic API on 127.0.0.1:8798
 npm run migrate:local            # creates the local D1 database (once, and after adding a migration)
+npm run mock                     # terminal 1: fake Anthropic API on 127.0.0.1:8798
 npm run dev                      # terminal 2: the gateway on http://127.0.0.1:8799
 ```
 
@@ -100,6 +102,7 @@ Add a test in `test/` for any parsing or calculation logic you change. The dashb
 2. If you added a migration: `npm run migrate` **before** deploying, and make sure the output shows the migration with ✅. Cloudflare's API sometimes fails a migration with "A request to the Cloudflare API … failed": just run it again. Deploying code that writes to a table or column that doesn't exist yet makes those writes fail silently (requests still work, but recording stops).
 3. `npm run deploy`
 4. Verify on the live dashboard (`/`), or `curl https://<worker>/dashboard/data`.
+5. Commit and `git push`. If keys, renewal days, settings or decisions changed, update [HANDOVER.md](HANDOVER.md) in the same commit.
 
 Migrations: add a new numbered file (`0008_...sql`); never edit one that has been applied. Keep them additive (`CREATE TABLE IF NOT EXISTS`, `ALTER TABLE ... ADD COLUMN`).
 

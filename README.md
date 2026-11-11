@@ -9,7 +9,7 @@ A **native Anthropic Messages API** gateway on Cloudflare Workers that pools up 
 
 ## On a new computer
 
-Everything that runs the gateway (code, settings) is in this repository, and every secret (Anthropic keys, gateway keys, the ntfy topic) is stored in Cloudflare, so there is nothing to copy from the old computer.
+Everything that runs the gateway (code, settings) is in this repository, and every secret (Anthropic keys, gateway keys, the ntfy topic) is stored in Cloudflare, so nothing has to be copied from the old computer for the gateway to keep working. Cloudflare never shows a secret again, though: keep the gateway keys you use and the ntfy topic in a password manager. The full checklist, including the Git identity to commit with, is in [HANDOVER.md](HANDOVER.md) ("On a new computer").
 
 1. Install [Node.js](https://nodejs.org) 22.18 or newer and [Git](https://git-scm.com).
 2. Get the code and its tools:
@@ -49,7 +49,7 @@ After deployment, copy the `https://...workers.dev` URL shown by Wrangler.
 
 ## Test
 
-PowerShell (use the gateway key, not an Anthropic key):
+PowerShell (use a gateway key, not an Anthropic key; this spends a fraction of a cent of credit):
 
 ```powershell
 $base = 'https://claude-multi-key-gateway.yunkangchen2017.workers.dev'
