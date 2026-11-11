@@ -3,6 +3,7 @@
 A **native Anthropic Messages API** gateway on Cloudflare Workers that pools up to six Anthropic Console API keys (one per organization, e.g. the monthly API credit of several Claude Max accounts) behind your own gateway keys. It accepts any model ID the keys can use, spends the credit that expires soonest first, fails over when a key is out of credit or failing, records usage, and serves a live dashboard with phone alerts. It does not use LiteLLM.
 
 - Live dashboard: https://claude-multi-key-gateway.yunkangchen2017.workers.dev/
+- Picking the project up (current state, runbook, decisions, open items): [HANDOVER.md](HANDOVER.md)
 - Developing the code: [DEVELOPMENT.md](DEVELOPMENT.md) · Adding keys (Chinese): [ADD-KEYS.md](ADD-KEYS.md)
 - Confirm that routing multiple personal subscriptions together is permitted under your Anthropic terms before using it.
 
@@ -30,16 +31,16 @@ The phone keeps receiving alerts regardless of which computer you use; `NTFY_TOP
 
 ## First-time deploy (Windows PowerShell)
 
-Only needed to create the gateway from scratch in a new Cloudflare account (it already exists). Also create the D1 database (see "Usage tracking") and apply the migrations. Open PowerShell inside this folder:
+Only needed to create the gateway from scratch in a new Cloudflare account (it already exists). Create the D1 database first (see the end of "Usage tracking"). Open PowerShell inside this folder:
 
 ```powershell
 npm install
 npx wrangler login
+npm run migrate
 npx wrangler deploy
 npx wrangler secret put GATEWAY_KEY
-npx wrangler secret put ANTHROPIC_KEY_1
-npx wrangler secret put ANTHROPIC_KEY_2
-npx wrangler secret put ANTHROPIC_KEY_3
+npx wrangler secret put ANTHROPIC_KEY_1   # and so on for each account, up to ANTHROPIC_KEY_6
+npx wrangler secret put NTFY_TOPIC        # optional: phone alerts
 ```
 
 Each secret command asks you to paste its value privately. Create a **new, strong, random** GATEWAY_KEY; do not use your Anthropic API key as the gateway key. You may need to deploy first so Wrangler can associate secrets with the Worker. `secret put` publishes a new version.
@@ -51,21 +52,21 @@ After deployment, copy the `https://...workers.dev` URL shown by Wrangler.
 PowerShell (use the gateway key, not an Anthropic key):
 
 ```powershell
-$base = 'https://YOUR-WORKER.YOUR-SUBDOMAIN.workers.dev'
+$base = 'https://claude-multi-key-gateway.yunkangchen2017.workers.dev'
 $gatewayKey = Read-Host 'Gateway API key'
 $headers = @{
   'x-api-key' = $gatewayKey
-  'anthropic-version' = '2026-10-21'
+  'anthropic-version' = '2023-06-01'
 }
 $payload = @{
-  model = 'YOUR_AVAILABLE_CLAUDE_MODEL_ID'
+  model = 'claude-opus-5-5'
   max_tokens = 100
   messages = @(@{ role = 'user'; content = 'Hello in Chinese' })
 } | ConvertTo-Json -Depth 10
 Invoke-RestMethod -Uri "$base/v1/messages" -Method Post -Headers $headers -ContentType 'application/json' -Body $payload
 ```
 
-Find supported model IDs in the [Claude model documentation](https://platform.claude.com/docs/en/about-claude/models/overview). `anthropic-version` is required by Anthropic; update the version if the current SDK/docs recommend a newer value. Requests are made with native Anthropic JSON, **not OpenAI Chat Completions**.
+The dashboard lists every model the keys can use; see also the [Claude model documentation](https://platform.claude.com/docs/en/about-claude/models/overview). `anthropic-version` is required by Anthropic (`2023-06-01` is current; the SDKs send it for you). Requests are made with native Anthropic JSON, **not OpenAI Chat Completions**.
 
 Example using `@anthropic-ai/sdk`:
 
@@ -73,10 +74,10 @@ Example using `@anthropic-ai/sdk`:
 import Anthropic from '@anthropic-ai/sdk';
 const client = new Anthropic({
   apiKey: process.env.GATEWAY_KEY!,
-  baseURL: 'https://YOUR-WORKER.YOUR-SUBDOMAIN.workers.dev',
+  baseURL: 'https://claude-multi-key-gateway.yunkangchen2017.workers.dev',
 });
 const reply = await client.messages.create({
-  model: 'YOUR_AVAILABLE_CLAUDE_MODEL_ID',
+  model: 'claude-opus-5-5',
   max_tokens: 100,
   messages: [{ role: 'user', content: 'Hello!' }],
 });
@@ -95,15 +96,9 @@ powershell -ExecutionPolicy Bypass -File .\new-gateway-key.ps1 -Name phone -Remo
 
 The local scripts (`sync-usage.ps1`, `gateway-status.ps1`, `test-gateway.ps1`) use their own key, `local` (`gateway-keys\local.txt`), so rotating `main` never breaks syncing. `gateway-status.ps1` lists the configured key names.
 
-## Add accounts 4, 5 and 6 later
+## Replace an account key
 
-```powershell
-npx wrangler secret put ANTHROPIC_KEY_4
-npx wrangler secret put ANTHROPIC_KEY_5
-npx wrangler secret put ANTHROPIC_KEY_6
-```
-
-No source edits required.
+All six slots are in use. To replace one (revoked or leaked key, another account), paste the new key with `npx wrangler secret put ANTHROPIC_KEY_N`; no deploy or code change is needed. If the account renews on a different day, also change its `CREDIT_EXPIRY_DAY_N` (below) and deploy. A seventh slot needs a small code change (see HANDOVER.md). The Console steps are in [ADD-KEYS.md](ADD-KEYS.md), part 2.
 
 ## Spend soonest-expiring credit first
 

@@ -2,7 +2,7 @@
 
 网关地址：`https://claude-multi-key-gateway.yunkangchen2017.workers.dev`
 Cloudflare Worker 名字：`claude-multi-key-gateway`
-项目文件夹（这台电脑）：`C:\Users\YunkangChen\Desktop\api\claude-cloudflare-gateway\claude-cloudflare-gateway`
+项目文件夹（第一台电脑）：`C:\Users\YunkangChen\Desktop\api\claude-cloudflare-gateway\claude-cloudflare-gateway`；换电脑见 [HANDOVER.md](HANDOVER.md)
 
 ## 先分清要加哪种 key
 
@@ -183,7 +183,7 @@ npx wrangler deploy
 - 运行 `.\gateway-status.ps1`，那一行的 `key_status` 应该是 `200`；
 - 或者在仪表盘上点 "Check keys now"。
 
-在别的设备上也可以只换 key：网页里把 `ANTHROPIC_KEY_4` 的值替换掉，或者运行 `npx wrangler secret put ANTHROPIC_KEY_4 --name claude-multi-key-gateway`。但**改续期日要在这台电脑上改 `wrangler.jsonc` 并部署**；在网页上直接改普通变量，下次部署时会被覆盖。
+在别的设备上也可以只换 key：网页里把 `ANTHROPIC_KEY_4` 的值替换掉，或者运行 `npx wrangler secret put ANTHROPIC_KEY_4 --name claude-multi-key-gateway`。但**改续期日要在有这份代码的电脑上改 `wrangler.jsonc` 并部署**（先 `git pull`，部署后 `git push`）；在网页上直接改普通变量，下次部署时会被覆盖。
 
 ### 加第 7 个及以上的账号
 

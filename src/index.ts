@@ -4,7 +4,7 @@
  * GET /gateway/status reports each key slot's priority, credit expiry, health and organization;
  * GET /gateway/usage pages through the per-request token usage recorded in D1; callers may label requests
  * with an `x-gateway-app: <project>` header for per-project breakdowns. /dashboard serves a live usage
- * dashboard; every key is re-checked at most every 15 minutes, driven by traffic and dashboard loads.
+ * dashboard; every key is re-checked at most every KEY_CHECK_INTERVAL_MINUTES, driven by traffic and dashboard loads.
  * Never logs prompts, API keys, or response bodies.
  */
 import { capAlert, keyAlert } from './alerts';

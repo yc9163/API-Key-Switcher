@@ -32,6 +32,6 @@
     "PUBLIC_URL": "https://claude-multi-key-gateway.yunkangchen2017.workers.dev"
   }
   // No cron trigger: this account's 5 free cron slots are used by other Workers. Key checks run at most every
-  // 15 minutes on gateway traffic and dashboard loads instead (src/dashboard.ts maybeCheckKeys). With Workers
-  // Paid, adding  "triggers": { "crons": ["*/15 * * * *"] }  also checks while nothing is using the gateway.
+  // KEY_CHECK_INTERVAL_MINUTES on gateway traffic and dashboard loads instead (src/dashboard.ts maybeCheckKeys).
+  // With Workers Paid, adding  "triggers": { "crons": ["0 * * * *"] }  also checks while nothing is using the gateway.
 }
