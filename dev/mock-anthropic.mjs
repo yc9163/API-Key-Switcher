@@ -7,15 +7,77 @@
 //   sk-good-costok    like sk-good-*, and the cost report accepts it ($12.35)
 //   sk-broke          400 "credit balance is too low" while state.broke is true
 //   sk-revoked        401 authentication_error
+// OpenAI side, under /openai (OPENAI_UPSTREAM_ORIGIN=http://127.0.0.1:8798/openai), by Authorization: Bearer:
+//   sk-openai-good    chat completions, responses (streaming too) and embeddings; 429 credit_balance_exhausted
+//                     while state.gptBroke is true
 // Controls:
-//   POST /__toggle {"broke":false,"overloaded":true,"extraModel":true}   change behaviour (sk-good-* answer 529 when overloaded)
+//   POST /__toggle {"broke":false,"overloaded":true,"extraModel":true,"gptBroke":true}   change behaviour
+//                    (sk-good-* answer 529 when overloaded)
 //   GET  /__hits     requests received since the last call (key, path, max_tokens)
 //   POST /__ntfy     where the gateway sends phone notifications (NTFY_SERVER=http://127.0.0.1:8798/__ntfy)
 //   GET  /__ntfy     notifications received since the last call
 import http from 'node:http';
 
 const PORT = Number(process.env.MOCK_PORT || 8798);
-const state = { broke: true, overloaded: false, extraModel: false };
+const state = { broke: true, overloaded: false, extraModel: false, gptBroke: false };
+
+// OpenAI usage objects as the real API returns them: Responses (with 30-minute and 12-hour cache writes) and Chat.
+const RESPONSES_USAGE = { input_tokens: 12000, input_tokens_details: { cached_tokens: 4000, cache_write_tokens: 7000,
+  cache_write_tokens_details: { ttl_30m_tokens: 3000, ttl_12h_tokens: 4000 } }, output_tokens: 800,
+  output_tokens_details: { reasoning_tokens: 200 }, total_tokens: 12800 };
+const CHAT_USAGE = { prompt_tokens: 1200, completion_tokens: 300, total_tokens: 1500,
+  prompt_tokens_details: { cached_tokens: 200 }, completion_tokens_details: { reasoning_tokens: 0 } };
+
+function openai(req, res, url, request, json) {
+  const key = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '');
+  const path = url.pathname.slice('/openai'.length);
+  hits.push({ key, path: `/openai${path}`, maxTokens: request.max_output_tokens ?? request.max_completion_tokens ?? null,
+    streamOptions: request.stream_options ?? null });
+  const headers = { 'openai-organization': 'user-mockorganization', 'x-request-id': `req_oa_${hits.length}`,
+    'x-ratelimit-limit-requests': '5000', 'x-ratelimit-limit-tokens': '4000000' };
+  const fail = (status, type, code, message) => json(status, { error: { message, type, param: null, code } }, headers);
+  if (key !== 'sk-openai-good') return fail(401, 'invalid_request_error', 'invalid_api_key', 'Incorrect API key provided.');
+  if (state.gptBroke && req.method === 'POST' && path !== '/v1/responses/input_tokens') {
+    return fail(429, 'insufficient_quota', 'credit_balance_exhausted', 'Your organization has no prepaid credits remaining.');
+  }
+  const model = request.model || 'gpt-6.1-sol';
+  const tier = request.service_tier === 'flex' ? 'flex' : 'default';
+  if (path === '/v1/models') return json(200, { object: 'list', data: [{ id: 'gpt-6.1-sol', object: 'model', owned_by: 'openai' }] }, headers);
+  if (path === '/v1/embeddings') {
+    return json(200, { object: 'list', data: [{ object: 'embedding', index: 0, embedding: [0.01, -0.02] }], model,
+      usage: { prompt_tokens: 1, total_tokens: 1 } }, headers);
+  }
+  if (path === '/v1/chat/completions') {
+    if (!request.stream) {
+      return json(200, { id: 'chatcmpl-mock', object: 'chat.completion', model: `${model}-2026-09-30`, service_tier: tier,
+        choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }], usage: CHAT_USAGE }, headers);
+    }
+    res.writeHead(200, { ...headers, 'content-type': 'text/event-stream' });
+    const chunk = (extra) => res.write(`data: ${JSON.stringify({ id: 'chatcmpl-mock', object: 'chat.completion.chunk', model, service_tier: tier, ...extra })}\n\n`);
+    const withUsage = request.stream_options?.include_usage === true;
+    for (const word of ['Hello', ' from', ' GPT']) chunk({ choices: [{ index: 0, delta: { content: word } }], ...(withUsage ? { usage: null } : {}) });
+    if (withUsage) chunk({ choices: [], usage: CHAT_USAGE });
+    res.end('data: [DONE]\n\n');
+    return;
+  }
+  if (path === '/v1/responses') {
+    // A long reply: response.completed repeats it, so its line is longer than the tail the gateway keeps.
+    const text = 'All work and no play. '.repeat(request.stream ? 1500 : 2);
+    const response = (status, usage) => ({ id: 'resp_mock', object: 'response', status, model: `${model}-2026-09-30`,
+      output: status === 'completed' ? [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] }] : [],
+      service_tier: tier, tools: [], usage, metadata: {} });
+    if (!request.stream) return json(200, response('completed', RESPONSES_USAGE), headers);
+    res.writeHead(200, { ...headers, 'content-type': 'text/event-stream' });
+    const send = (type, data) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`);
+    send('response.created', { response: response('in_progress', null) });
+    for (let i = 0; i < 30; i++) send('response.output_text.delta', { delta: text.slice(i * 1100, (i + 1) * 1100) });
+    send('response.completed', { response: response('completed', RESPONSES_USAGE) });
+    res.end();
+    return;
+  }
+  if (path === '/v1/responses/input_tokens') return json(200, { object: 'response.input_tokens', input_tokens: 12 }, headers);
+  return fail(404, 'invalid_request_error', 'not_found', `mock: no route for ${req.method} ${url.pathname}`);
+}
 let hits = [];
 let notes = [];
 
@@ -57,9 +119,10 @@ http.createServer(async (req, res) => {
   if (url.pathname === '/__ntfy' && req.method === 'POST') { notes.push(JSON.parse(body || '{}')); return json(200, {}); }
   if (url.pathname === '/__ntfy') { const out = notes; notes = []; return json(200, out); }
 
-  const key = req.headers['x-api-key'] ?? '';
   let request = {};
   try { request = JSON.parse(body); } catch {}
+  if (url.pathname.startsWith('/openai/')) return openai(req, res, url, request, json);
+  const key = req.headers['x-api-key'] ?? '';
   hits.push({ key, path: url.pathname, maxTokens: request.max_tokens ?? null });
   const headers = { 'anthropic-organization-id': `org-${key}`, 'request-id': `req_mock_${hits.length}`, ...RATE_LIMIT_HEADERS };
   const fail = (status, type, message) => json(status, { type: 'error', error: { type, message } }, headers);

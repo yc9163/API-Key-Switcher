@@ -15,6 +15,7 @@ knowing next time (a new key, a changed renewal day, a decision, a new idea) bel
 | The running gateway | Cloudflare Worker `claude-multi-key-gateway` (workers.dev subdomain `yunkangchen2017`); `npx wrangler login` to manage it | Redeploy from this repo |
 | Usage history | Cloudflare D1 database `claude-usage`. Nothing is ever deleted from it | — |
 | Anthropic keys | Cloudflare secrets `ANTHROPIC_KEY_1` … `_6` | Create a new key in that Console organization and `npx wrangler secret put ANTHROPIC_KEY_N` |
+| GPT (OpenAI) key | Cloudflare secret `OPENAI_API_KEY` | Create a new key at platform.openai.com and `npx wrangler secret put OPENAI_API_KEY` |
 | Gateway keys | Cloudflare secrets `GATEWAY_KEY` (`main`) and `GATEWAY_KEY_<NAME>`; the values also sit wherever each one is used (the apps, `gateway-keys\` on a PC) | Put a new value under the same name; the old value stops working |
 | Phone-alert topic | Cloudflare secret `NTFY_TOPIC`, plus `NTFY_TOPIC.txt` on the first PC | Put a new `NTFY_TOPIC` and subscribe the phone to it |
 | `usage\` CSVs and `report.html` | On each Windows PC that runs `sync-usage.ps1`; copies of D1 | The first sync on a new PC downloads everything again |
@@ -27,7 +28,7 @@ keeping the ones in use in a password manager just saves replacing them.
 Only the owner's accounts have access. To add a second maintainer, invite them to the Cloudflare account (Manage
 Account → Members) and as a collaborator on the GitHub repository.
 
-## Current state (2026-11-11)
+## Current state (2026-11-25)
 
 - Gateway and public dashboard: https://claude-multi-key-gateway.yunkangchen2017.workers.dev/
 - D1 `claude-usage`, id `8ceef542-1ceb-494c-9153-233b464e6a02`, all migrations up to `0007` applied.
@@ -38,8 +39,11 @@ Account → Members) and as a collaborator on the GitHub repository.
 
 Six Claude Max 20x accounts, each its own Console organization with $200 of API credit per billing cycle, expiring at
 the end of the cycle with no rollover. Each organization is Start tier: 4,000 RPM, 2M input and 400K output tokens per
-minute on Claude Opus 5.5, and a $500/month Console spend cap. All six could use the same 13 models at the last check,
-and all six were working.
+minute on Claude Opus 5.5, and a $500/month Console spend cap. All six could use the same 13 models at the last check.
+
+**Keys 1 and 4 have been invalid since 2026-11-19** (Anthropic answers 401 "invalid x-api-key"; the other four work and
+Claude requests fail over to them). The owner is to create new keys in organizations `acbf2d93` and `66fd0cb1` and
+put them with `npx wrangler secret put ANTHROPIC_KEY_1` / `_4`. Update this paragraph once they work again.
 
 | Slot | Credit renews (day of month, UTC) | Organization (first 8 characters) |
 |---|---|---|
@@ -53,6 +57,12 @@ and all six were working.
 Requests go to the key whose credit expires soonest, so the order rotates through the month. On 2026-11-11 it was
 3, 4, 6, 5, 1, 2. `gateway-status.ps1` or the dashboard shows the live order.
 
+### GPT (OpenAI) key
+
+Added to the code on 2026-11-19: one OpenAI key, served separately in OpenAI's format at `/openai/v1` (README, "GPT
+(OpenAI) key"). $100 of credit a month, renewing on the 17th (UTC); auto-recharge is off. The owner added the
+`OPENAI_API_KEY` secret on 2026-11-19.
+
 ### Gateway keys
 
 | Name | Secret | Used by |
@@ -62,20 +72,23 @@ Requests go to the key whose credit expires soonest, so the order rotates throug
 | `phone` | `GATEWAY_KEY_PHONE` | The owner's phone (`gateway-keys\phone.txt` on the first PC) |
 | `travelscape` | `GATEWAY_KEY_TRAVELSCAPE` | An app of the owner's; the value isn't stored on the first PC |
 
-All 11 secrets: `ANTHROPIC_KEY_1`–`6`, `GATEWAY_KEY`, `GATEWAY_KEY_LOCAL`, `GATEWAY_KEY_PHONE`,
-`GATEWAY_KEY_TRAVELSCAPE`, `NTFY_TOPIC`. `DASHBOARD_KEY` is deliberately absent (public dashboard).
+All 12 secrets: `ANTHROPIC_KEY_1`–`6`, `GATEWAY_KEY`, `GATEWAY_KEY_LOCAL`, `GATEWAY_KEY_PHONE`,
+`GATEWAY_KEY_TRAVELSCAPE`, `NTFY_TOPIC`, `OPENAI_API_KEY`. `DASHBOARD_KEY` is deliberately
+absent (public dashboard).
 
 ### Settings
 
 In `wrangler.jsonc`: renewal days as above, `MONTHLY_CREDIT_USD` 200, key checks every 60 minutes with
-`claude-opus-5-5`, spending cap $100 per rolling 24 hours.
+`claude-opus-5-5` (GPT: a one-token embedding with `text-embedding-3-small`), spending cap $100 per rolling 24 hours
+shared by Claude and GPT, GPT credit settings as above.
 
 ## On a new computer
 
 Accounts needed:
 - Cloudflare: the account that owns the Worker. Keep two-factor sign-in on; it controls everything.
 - GitHub `yc9163`, to push.
-- Only for key work: claude.ai and the Console (platform.claude.com) of the account concerned.
+- Only for key work: claude.ai and the Console (platform.claude.com) of the account concerned, or platform.openai.com
+  for the GPT key.
 - Only for alerts: the ntfy app on the phone.
 
 1. Install Node.js 22.18 or newer and Git.
@@ -105,6 +118,8 @@ That holds for one-line settings changes too: a renewal day or the cap edited on
 | A seventh account | Code change: `SLOTS` and `Env` in `src/shared.ts`, a `CREDIT_EXPIRY_DAY_7` in `wrangler.jsonc`, then test against the mock |
 | Give an app, device or person access | Add a gateway key: [ADD-KEYS.md](ADD-KEYS.md), part 1. Revoke it by deleting the secret |
 | Rotate `main` | `npx wrangler secret put GATEWAY_KEY`, then update the apps that use it |
+| The GPT key runs out of credit | GPT requests fail with OpenAI's `429 credit_balance_exhausted` until its renewal (there is no stand-in); the dashboard and phone say so. Claude is not affected |
+| Replace the GPT key, or its credit or renewal day changes | `npx wrangler secret put OPENAI_API_KEY`; amount and day: `OPENAI_MONTHLY_CREDIT_USD` and `OPENAI_CREDIT_EXPIRY_DAY` in `wrangler.jsonc`, deploy, push. [ADD-KEYS.md](ADD-KEYS.md), part 3 |
 | Alerts on a new phone | Install ntfy and subscribe to the topic on server `ntfy.sh`. The topic name is shown in the ntfy app of a phone that's already subscribed (or in `NTFY_TOPIC.txt` on the first PC); if none has it, make a new random one, `npx wrangler secret put NTFY_TOPIC`, and subscribe every phone to it |
 | Make the dashboard private | `npx wrangler secret put DASHBOARD_KEY` (README, "Online dashboard") |
 | A deploy broke something | `npx wrangler deployments list` shows recent deployments (a `secret put` also creates one); `npx wrangler rollback <version-id>` returns to the one before the bad deploy. Migrations are additive, so older code still works. Then fix, deploy, push |
@@ -135,8 +150,14 @@ That holds for one-line settings changes too: a renewal day or the cap edited on
 - **UTC days everywhere**, matching the Console and when credit expires.
 - **Scripts have their own `local` gateway key.** Rotating `main` once silently broke the automatic sync for a week.
 - **Only token counts and costs are recorded**, never prompts or replies. Phone alerts are in Chinese.
+- **GPT is a separate entry point, not a fallback (owner's choice, 2026-11-19).** Apps call it in OpenAI's format at
+  `/openai/v1`. Translating Claude requests to GPT when Claude credit runs out was offered and declined: different
+  models, tool formats and caching make the answers differ. It shares the gateway keys, the spending cap, the
+  dashboard and alerts, and is stored as slot `100`.
+- **Streamed Chat Completions get `stream_options.include_usage` added** when the caller didn't set it; without it
+  OpenAI reports no usage and the spend (and the cap) would miss those requests.
 
-## Facts about Anthropic worth knowing
+## Facts about Anthropic and OpenAI worth knowing
 
 - Max-plan API credit can't be used by Claude Code. Don't set `ANTHROPIC_API_KEY` or `ANTHROPIC_BASE_URL` globally on a
   machine that runs Claude Code.
@@ -145,6 +166,11 @@ That holds for one-line settings changes too: a renewal day or the cap edited on
 - If auto-reload or a payment method is enabled in a Console organization, requests can spend real money after the
   credit runs out, and the gateway won't move to another key. Keep both off.
 - `max_tokens: 0` requests are accepted and cost only the input tokens, so the gateway uses them as key checks.
+- OpenAI: a key without credit gets `429` with code `credit_balance_exhausted` (older: `insufficient_quota`) on every
+  billed endpoint; spend and usage limits are `429` with `*_spend_limit_exceeded` / `*_usage_limit_exceeded`, whose
+  type can still read `insufficient_quota`. Its pricing page has a markdown version
+  (`developers.openai.com/api/docs/pricing.md`, append `.md` to any docs page). Normal API keys can't read the credit
+  balance either.
 
 ## Open items and ideas
 
@@ -154,6 +180,9 @@ That holds for one-line settings changes too: a renewal day or the cap edited on
 - Some of the owner's traffic has no `x-gateway-app` header: a Haiku app that pre-warms a 10–24K-token prompt cache every
   few minutes. Tagging it would split it out on the dashboard. Its refresh interval should stay under 5 minutes, or each
   warm-up writes the cache again.
+- GPT: OpenAI's Costs API (`/v1/organization/costs`) would give exact GPT spend, but needs an Admin key (`sk-admin-…`);
+  not built. Background-mode responses are recorded without usage. Images, audio, files and batches aren't passed
+  through. A second GPT key would need slots 101+ and failover between them.
 - Offered but not built:
   - a phone reminder a few days before a key renews with much credit left, so it gets used;
   - Message Batches passthrough (50% cheaper, but a batch must stay on the key that created it);
@@ -171,3 +200,5 @@ That holds for one-line settings changes too: a renewal day or the cap edited on
   - hourly key checks;
   - automatic prices and model discovery, the status page, rate limits and tier.
 - **2026-11-11:** code published to GitHub, with the local mock, tests, DEVELOPMENT.md and this handover.
+- **2026-11-19:** GPT (OpenAI) key support: `/openai/v1` entry point, OpenAI prices read daily, GPT on the dashboard
+  and in alerts (deployed that day; GPT credit settings deployed 2026-11-25).

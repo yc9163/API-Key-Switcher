@@ -9,7 +9,7 @@
 <meta name="robots" content="noindex, nofollow">
 <!-- Inline icon: browsers then never request /favicon.ico from the gateway. -->
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%232a78d6'/%3E%3Cpath d='M4.5 11.5v-3M8 11.5v-7M11.5 11.5v-5' stroke='white' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E">
-<title>Claude credit usage</title>
+<title>API credit usage</title>
 <style>
   .viz-root {
     color-scheme: light;
@@ -18,6 +18,7 @@
     --grid: #e1e0d9; --baseline: #c3c2b7; --border: rgba(11,11,11,0.10);
     --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a;
     --series-4: #eda100; --series-5: #e87ba4; --series-6: #008300;
+    --series-7: #6250d6; /* the GPT key */
     --other: #898781;
     --meter-fill: #2a78d6; --meter-track: #cde2fb;
     /* sequential blue for the heatmap, near zero receding toward the surface */
@@ -32,6 +33,7 @@
       --grid: #2c2c2a; --baseline: #383835; --border: rgba(255,255,255,0.10);
       --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70;
       --series-4: #c98500; --series-5: #d55181; --series-6: #008300;
+      --series-7: #9085e9;
       --meter-fill: #3987e5; --meter-track: color-mix(in srgb, #3987e5 18%, #1a1a19);
       --seq-0: #232321; --seq-1: #0d366b; --seq-2: #184f95; --seq-3: #256abf; --seq-4: #3987e5; --seq-5: #86b6ef;
     }
@@ -170,7 +172,7 @@
 <main id="main">
   <header class="top">
     <div>
-      <div class="title-row"><h1>Claude credit usage</h1><span id="overall"></span><span id="anthropic"></span></div>
+      <div class="title-row"><h1>API credit usage</h1><span id="overall"></span><span id="anthropic"></span></div>
       <p class="sub" id="synced">Loading the latest usage…</p>
     </div>
     <button type="button" id="check" hidden>Check keys now</button>
@@ -235,7 +237,7 @@
     <h3 id="errors-title">Recent errors</h3>
     <div class="table-wrap" id="errors"></div>
   </section>
-  <p class="footnote"><span id="alerts-note"></span> <span id="cost-note"></span> <span id="pricing-note">Amounts are estimates from Anthropic's published prices</span> for traffic through the gateway only; Console &gt; Billing has each organization's exact balance. Days are UTC, matching the credit expiry dates.</p>
+  <p class="footnote"><span id="alerts-note"></span> <span id="cost-note"></span> <span id="pricing-note">Amounts are estimates from Anthropic's published prices</span> for traffic through the gateway only; the Console's (and OpenAI's) Billing page has each organization's exact balance. Days are UTC, matching the credit expiry dates.</p>
 </main>
 </div>
 <script>
@@ -246,6 +248,12 @@ const DATA = /*__DATA__*/null;
   const DAY = 86400000;
   const REFRESH_MS = 60000;
   const KEY_CHECK_APP = '(key check)';
+  const GPT_SLOT = 100; // the OpenAI key's slot in the usage tables
+  // Names and colours follow the key: Claude keys use their slot's colour, the GPT key the seventh.
+  const keyName = (slot) => (Number(slot) === GPT_SLOT ? 'GPT' : `Key ${slot}`);
+  const keyColor = (slot) => (Number(slot) === GPT_SLOT ? 'var(--series-7)' : slot >= 1 && slot <= 6 ? `var(--series-${slot})` : 'var(--other)');
+  const isGpt = (k) => k.provider === 'openai';
+  const providerName = (k) => (isGpt(k) ? 'OpenAI' : 'Anthropic');
   const $ = (id) => document.getElementById(id);
   const SVGNS = 'http://www.w3.org/2000/svg';
   function el(tag, attrs, ...kids) {
@@ -311,9 +319,11 @@ const DATA = /*__DATA__*/null;
     const h = k.health;
     const code = h && h.httpStatus ? ` (${h.httpStatus})` : '';
     if (k.outOfCreditUntil) return { kind: 'critical', label: `Out of credit until ${fmtDay(Date.parse(k.outOfCreditUntil))}` };
+    if (h && h.state === 'upstream_error') return { kind: 'warning', label: `${providerName(k)} error` };
     if (h && HEALTH[h.state]) return { kind: HEALTH[h.state][0], label: HEALTH[h.state][1] + (HEALTH[h.state][0] === 'critical' ? code : '') };
     if (k.keyStatus !== undefined && k.keyStatus !== 200) return { kind: 'critical', label: `Key error (${k.keyStatus})` };
     if (k.coolingDown) return { kind: 'warning', label: 'Rate limited, paused' };
+    if (isGpt(k)) return { kind: 'good', label: 'Ready for GPT' };
     if (k.priority === 1) return { kind: 'good', label: 'In use' };
     return { kind: 'neutral', label: `Standby (#${k.priority})` };
   }
@@ -325,13 +335,25 @@ const DATA = /*__DATA__*/null;
     return Date.UTC(y, m, Math.min(renewDay, last));
   }
   // Spend the recent daily pace from the soonest-expiring credit first (as the gateway does) and record
-  // what is left in each key when it renews: that credit expires unused.
+  // what is left in each key when it renews: that credit expires unused. Claude and GPT credit are projected
+  // separately, each with its own pace: a Claude request can't use GPT credit, and the other way round.
   function project(D) {
-    const keys = D.keys.filter((k) => k.renewDay && k.nextRenewal).map((k) => ({
+    const perSlot = {};
+    let total = null;
+    for (const provider of ['anthropic', 'openai']) {
+      const keys = D.keys.filter((k) => (k.provider || 'anthropic') === provider && k.renewDay && k.nextRenewal && k.credit);
+      const burn = D.burnByProvider ? D.burnByProvider[provider] || 0 : provider === 'anthropic' ? D.burnPerDay : 0;
+      const part = projectGroup(D, keys, burn);
+      if (part) { Object.assign(perSlot, part); total = (total || 0) + Object.values(part).reduce((a, b) => a + b, 0); }
+    }
+    return { perSlot, total };
+  }
+  function projectGroup(D, group, burnPerDay) {
+    const keys = group.map((k) => ({
       slot: k.slot, renewDay: k.renewDay, credit: k.credit, renew: parseDay(k.nextRenewal), unused: null,
       remaining: isOutOfCredit(k) ? 0 : Math.max(0, k.credit - spentOf(k)),
     }));
-    if (!keys.length) return { perSlot: {}, total: null };
+    if (!keys.length) return null;
     const end = Math.max(...keys.map((k) => k.renew));
     for (let t = parseDay(D.todayUtc), first = true; t < end; t += DAY, first = false) {
       for (const k of keys) {
@@ -341,7 +363,7 @@ const DATA = /*__DATA__*/null;
           k.renew = addMonth(k.renew, k.renewDay);
         }
       }
-      let spend = D.burnPerDay * (first ? 1 - D.dayFractionElapsed : 1);
+      let spend = burnPerDay * (first ? 1 - D.dayFractionElapsed : 1);
       for (const k of [...keys].sort((a, b) => a.renew - b.renew || a.slot - b.slot)) {
         const take = Math.min(spend, k.remaining);
         k.remaining -= take; spend -= take;
@@ -350,14 +372,14 @@ const DATA = /*__DATA__*/null;
     }
     const perSlot = {};
     for (const k of keys) perSlot[k.slot] = k.unused === null ? k.remaining : k.unused;
-    return { perSlot, total: Object.values(perSlot).reduce((a, b) => a + b, 0) };
+    return perSlot;
   }
 
   // ---------- Usage rows, ranges and grouping ----------
   // Row fields (from the gateway): day, slot, client, app, model, requests, errors, input, output, cacheWrite, cacheRead, cost.
   const F = { day: 0, slot: 1, client: 2, app: 3, model: 4, requests: 5, errors: 6, input: 7, output: 8, cacheWrite: 9, cacheRead: 10, cost: 11 };
   const DIMS = {
-    key: { label: 'Key', title: 'key', of: (r) => `Key ${r[F.slot]}` },
+    key: { label: 'Key', title: 'key', of: (r) => keyName(r[F.slot]) },
     model: { label: 'Model', title: 'model', of: (r) => r[F.model] || 'unknown' },
     client: { label: 'Gateway key', title: 'gateway key', of: (r) => r[F.client] || KEY_CHECK_APP },
     app: { label: 'App', title: 'app', of: (r) => r[F.app] || 'untagged' },
@@ -381,7 +403,7 @@ const DATA = /*__DATA__*/null;
     const map = new Map();
     if (state.by === 'key') {
       const slots = new Set([...D.keys.map((k) => k.slot), ...D.rows.map((r) => r[F.slot])]);
-      [...slots].sort((a, b) => a - b).forEach((s) => map.set(`Key ${s}`, s <= 6 ? `var(--series-${s})` : 'var(--other)'));
+      [...slots].sort((a, b) => a - b).forEach((s) => map.set(keyName(s), keyColor(s)));
       return map;
     }
     const totals = new Map();
@@ -547,8 +569,11 @@ const DATA = /*__DATA__*/null;
     const statuses = new Map(D.keys.map((k) => [k.slot, keyStatus(k)]));
     const down = D.keys.filter((k) => statuses.get(k.slot).kind === 'critical');
     const warn = D.keys.filter((k) => statuses.get(k.slot).kind === 'warning');
-    const left = D.keys.reduce((a, k) => a + (k.renewDay ? (isOutOfCredit(k) ? 0 : Math.max(0, k.credit - spentOf(k))) : 0), 0);
-    const pool = D.keys.filter((k) => k.renewDay).reduce((a, k) => a + k.credit, 0);
+    const counted = D.keys.filter((k) => k.renewDay && k.credit); // keys whose renewal day and credit are set
+    const left = counted.reduce((a, k) => a + (isOutOfCredit(k) ? 0 : Math.max(0, k.credit - spentOf(k))), 0);
+    const pool = counted.reduce((a, k) => a + k.credit, 0);
+    const claude = D.keys.filter((k) => !isGpt(k));
+    const hasGpt = D.keys.some(isGpt);
 
     // Rolling 24-hour spending cap (the gateway pauses requests at the cap).
     const cap = D.cap || { limit: 0, spent24h: 0 };
@@ -557,8 +582,8 @@ const DATA = /*__DATA__*/null;
     const capNear = cap.limit > 0 && !capHit && capShare >= 0.8;
 
     $('synced').textContent = syncedLine();
-    document.title = capHit ? '⛔ Spending cap reached · Claude credit usage'
-      : down.length ? `⚠ ${down.length} key${down.length > 1 ? 's' : ''} down · Claude credit usage` : 'Claude credit usage';
+    document.title = capHit ? '⛔ Spending cap reached · API credit usage'
+      : down.length ? `⚠ ${down.length} key${down.length > 1 ? 's' : ''} down · API credit usage` : 'API credit usage';
     $('overall').replaceChildren(down.length || capHit ? '' : capNear ? pill('warning', `${pct(capShare)} of daily cap used`)
       : warn.length ? pill('warning', `${D.keys.length - warn.length} of ${D.keys.length} keys OK`)
       : pill('good', `All ${D.keys.length} keys OK`));
@@ -584,12 +609,16 @@ const DATA = /*__DATA__*/null;
     const banner = $('banner');
     banner.hidden = down.length === 0 && !capHit;
     if (!banner.hidden) {
-      const allDown = down.length === D.keys.length;
-      const headline = capHit
+      // Claude keys stand in for each other; the GPT key has no stand-in.
+      const claudeDown = down.filter((k) => !isGpt(k)).length;
+      const gptDown = down.some(isGpt);
+      const gptNote = gptDown ? (claudeDown ? " The GPT key can't be used either: GPT requests will fail." : '') : '';
+      const headline = (capHit
         ? (down.length ? `Daily spending cap reached, and ${down.length} key${down.length > 1 ? 's' : ''} can't be used.` : 'Daily spending cap reached: new requests are paused.')
-        : allDown ? 'No key can be used: requests through the gateway will fail.'
-        : `${down.length} key${down.length > 1 ? 's' : ''} can't be used. Requests are going to your other keys.`;
-      const items = down.map((k) => `Key ${k.slot}: ${statuses.get(k.slot).label}` + (k.health && k.health.message ? ` - ${k.health.message}` : ''));
+        : !claudeDown ? "The GPT key can't be used: GPT requests through the gateway will fail. Claude is not affected."
+        : claudeDown === claude.length ? `No Claude key can be used: Claude requests through the gateway will fail.${gptNote}`
+        : `${claudeDown} Claude key${claudeDown > 1 ? 's' : ''} can't be used. Claude requests are going to your other keys.${gptNote}`);
+      const items = down.map((k) => `${keyName(k.slot)}: ${statuses.get(k.slot).label}` + (k.health && k.health.message ? ` - ${k.health.message}` : ''));
       if (capHit) items.unshift(`About ${usd(cap.spent24h)} spent in the last 24 hours (cap ${usd(cap.limit)}). Requests resume automatically as older spending leaves the 24-hour window; raise DAILY_SPEND_CAP_USD to lift it sooner.`);
       banner.replaceChildren(icon('critical', 18), el('div', {}, el('strong', {}, headline), el('ul', {}, items.map((t) => el('li', {}, t)))));
     }
@@ -601,26 +630,27 @@ const DATA = /*__DATA__*/null;
       'aria-valuenow': cap.spent24h.toFixed(2), 'aria-label': 'Spending in the last 24 hours against the cap', style: 'margin-top:10px' },
       el('div', { style: `width:${Math.min(100, capShare * 100)}%;background:${capFill}` })));
     // The credit that renews next, and the daily spend that would use all of it before it expires.
-    const dated = D.keys.filter((k) => k.renewDay && k.nextRenewal);
+    const dated = D.keys.filter((k) => k.renewDay && k.nextRenewal && k.credit);
     let nextTile = tile('Next credit renewal', '—', 'no renewal days set');
     if (dated.length) {
       const next = dated.map((k) => k.nextRenewal).sort()[0];
       const group = dated.filter((k) => k.nextRenewal === next).sort((a, b) => a.slot - b.slot);
       const leftNext = group.reduce((a, k) => a + (isOutOfCredit(k) ? 0 : Math.max(0, k.credit - spentOf(k))), 0);
       const daysToGo = Math.max(0.25, (parseDay(next) - Date.parse(D.generatedAt)) / DAY);
-      const names = group.map((k) => `Key ${k.slot}`).join(', ');
+      const names = group.map((k) => keyName(k.slot)).join(', ');
       nextTile = tile('Next credit renewal', fmtDay(parseDay(next)), leftNext >= 0.01
         ? `${names}: ${usd(leftNext)} left, expiring in ${daysToGo < 1 ? 'under a day' : `${Math.round(daysToGo)} day${Math.round(daysToGo) === 1 ? '' : 's'}`}. About ${usd(leftNext / daysToGo)}/day would use it all.`
         : `${names}: credit fully used.`);
     }
     $('credit-kpis').replaceChildren(
-      tile('Credit left this cycle', usd(left), `of ${usd(pool)} across ${D.keys.filter((k) => k.renewDay).length} keys`),
+      tile('Credit left this cycle', usd(left), `of ${usd(pool)} across ${counted.length} key${counted.length === 1 ? '' : 's'}`),
       tile('Projected to expire unused', proj.total === null ? '—' : usd(proj.total), `if spending stays at ${usd(D.burnPerDay)}/day (7-day average)`),
       nextTile,
       capTile,
     );
     const every = D.checkIntervalMinutes || 60;
-    $('credit-sub').textContent = 'Requests use the key whose credit expires soonest until it runs out or fails. ' +
+    $('credit-sub').textContent = 'Claude requests use the key whose credit expires soonest until it runs out or fails' +
+      (hasGpt ? '; GPT requests (/openai/v1) use the GPT key. ' : '. ') +
       `Keys are checked automatically about every ${every % 60 ? `${every} minutes` : every === 60 ? 'hour' : `${every / 60} hours`} ` +
       '(when the gateway is used or this page is open), and right away when a request runs into a problem.';
     // Whether Anthropic's cost report (exact spend) accepts the keys; it normally needs an Admin API key.
@@ -633,6 +663,10 @@ const DATA = /*__DATA__*/null;
     $('pricing-note').textContent = !pr ? "Amounts are estimates from Anthropic's published prices"
       : pr.fetchedAt ? `Amounts are estimates from Anthropic's pricing page (prices read ${fmtDay(Date.parse(pr.fetchedAt))}, checked daily${pr.error ? `; the latest check failed: ${pr.error}` : ''})`
       : `Amounts are estimates from the gateway's built-in price list${pr.error ? ` (reading Anthropic's pricing page failed: ${pr.error})` : ''}`;
+    const op = pr && pr.openai;
+    if (op) $('pricing-note').textContent += op.fetchedAt
+      ? `; GPT amounts from OpenAI's pricing page (read ${fmtDay(Date.parse(op.fetchedAt))}${op.error ? `; the latest check failed: ${op.error}` : ''})`
+      : `; GPT amounts from the built-in OpenAI price list${op.error ? ` (reading OpenAI's pricing page failed: ${op.error})` : ''}`;
     $('alerts-note').textContent = D.alertsEnabled
       ? 'Phone alerts are on (ntfy): keys that stop working or come back, and the spending cap.'
       : 'Phone alerts are off.';
@@ -650,31 +684,34 @@ const DATA = /*__DATA__*/null;
       const used = empty ? Math.max(k.credit, spent) : spent;
       const outside = empty ? k.credit - k.cycleToDate : 0;
       const width = k.credit ? Math.min(100, (used / k.credit) * 100) : 0;
+      const who = providerName(k);
       let message = null;
       if (empty) {
         message = outside >= 1
-          ? `Anthropic says this key's credit is used up. ${usd(k.cycleToDate)} of it went through the gateway; about ${usd(outside)} was used outside it (other keys or apps in this organization).`
-          : "Anthropic says this key's credit is used up.";
+          ? `${who} says this key's credit is used up. ${usd(k.cycleToDate)} of it went through the gateway; about ${usd(outside)} was used outside it (other keys or apps in this organization).`
+          : `${who} says this key's credit is used up.`;
       } else if (k.health && k.health.state !== 'ok' && k.health.message) {
-        message = `Anthropic: ${k.health.message}`;
+        message = `${who}: ${k.health.message}`;
+      } else if (!k.credit) {
+        message = 'Monthly credit amount not set (OPENAI_MONTHLY_CREDIT_USD in wrangler.jsonc): spend is shown without a meter.';
       }
       const checkText = k.health
         ? `${k.health.state === 'ok' ? 'OK' : (HEALTH[k.health.state] || ['', k.health.state])[1]} · ${ago(k.health.checkedAt)}`
         : 'not checked yet';
       return el('div', { class: 'krow' },
         el('div', { class: 'kname' },
-          el('div', { class: 'kline' }, swatch(`var(--series-${k.slot})`), `Key ${k.slot}`, pill(st.kind, st.label)),
+          el('div', { class: 'kline' }, swatch(keyColor(k.slot)), keyName(k.slot), pill(st.kind, st.label)),
           el('div', { class: 'org', title: k.limits ? `Rate limits for ${k.limits.model}: ${k.limits.rpm.toLocaleString('en-US')} requests, ${compact(k.limits.itpm || 0)} input tokens and ${compact(k.limits.otpm || 0)} output tokens per minute` +
             (k.tier && k.tier.spendCapUsd ? `; ${k.tier.name} tier monthly spend cap ${usd(k.tier.spendCapUsd)}` : '') : null },
             [k.orgId ? `org ${k.orgId}…` : null, k.tier ? `${k.tier.name} tier` : null,
              k.limits ? `${k.limits.rpm.toLocaleString('en-US')} RPM` : null].filter(Boolean).join(' · '))),
         el('div', { class: 'kused', 'data-label': 'Used this cycle' },
-          el('div', {}, el('span', { class: 'amount' }, usd(used)), el('span', { class: 'muted' }, ` of ${usd(k.credit)}`)),
-          el('div', { class: 'meter', role: 'meter', 'aria-valuemin': 0, 'aria-valuemax': k.credit, 'aria-valuenow': used.toFixed(2),
-            'aria-label': `Key ${k.slot} credit used` }, el('div', { style: `width:${width}%` }))),
+          el('div', {}, el('span', { class: 'amount' }, usd(used)), el('span', { class: 'muted' }, k.credit ? ` of ${usd(k.credit)}` : ' (credit not set)')),
+          k.credit ? el('div', { class: 'meter', role: 'meter', 'aria-valuemin': 0, 'aria-valuemax': k.credit, 'aria-valuenow': used.toFixed(2),
+            'aria-label': `${keyName(k.slot)} credit used` }, el('div', { style: `width:${width}%` })) : null),
         el('div', { 'data-label': 'Renews' }, k.renewDay
           ? `${fmtDay(parseDay(k.nextRenewal))} · in ${k.daysLeft} day${k.daysLeft === 1 ? '' : 's'}` : 'not set'),
-        el('div', { class: 'num', 'data-label': 'Projected unused' }, k.renewDay ? usd(proj.perSlot[k.slot] ?? 0) : '—'),
+        el('div', { class: 'num', 'data-label': 'Projected unused' }, k.renewDay && k.credit ? usd(proj.perSlot[k.slot] ?? 0) : '—'),
         el('div', { class: 'num', 'data-label': 'Today' }, usd(k.today)),
         el('div', { 'data-label': 'Last check' }, checkText),
         message ? el('p', { class: 'kmsg' }, message) : null);
@@ -862,7 +899,7 @@ const DATA = /*__DATA__*/null;
   // ---------- Models the keys can use (Models API, refreshed daily) ----------
   function renderModels() {
     const models = D.models || [];
-    const keyCount = D.keys.length;
+    const keyCount = D.keys.filter((k) => !isGpt(k)).length; // Claude models, listed by the Claude keys
     $('models-sub').textContent = models.length
       ? `From Anthropic's Models API for each key, checked daily${D.discoveredAt ? ` (last ${ago(D.discoveredAt)})` : ''}. Prices per million tokens; new models trigger a phone alert.`
       : 'Not checked yet: the list appears after the first daily check.';
@@ -878,7 +915,7 @@ const DATA = /*__DATA__*/null;
         el('span', { class: 'mono' }, m.id),
         tokens(m.maxInput), tokens(m.maxOutput),
         m.price ? usd(m.price[0]) : '—', m.price ? usd(m.price[4]) : '—',
-        m.keys.length >= keyCount ? 'all' : m.keys.map((s) => `Key ${s}`).join(', '),
+        m.keys.length >= keyCount ? 'all' : m.keys.map(keyName).join(', '),
       ])));
   }
 
@@ -887,8 +924,8 @@ const DATA = /*__DATA__*/null;
       $('errors').replaceChildren(el('div', { class: 'empty' }, 'No failed requests recorded.'));
     } else {
       $('errors').replaceChildren(table(
-        [{ label: 'Time (local)' }, { label: 'Key slot', num: true }, { label: 'Gateway key' }, { label: 'App' }, { label: 'Model' }, { label: 'Status', num: true }, { label: 'Error' }],
-        D.errors.map((e) => [e.time ? localTime(e.time) : e.timeLocal, String(e.slot), e.client || '—', e.app || 'untagged', e.model || 'unknown', String(e.status), e.errorType || '—'])));
+        [{ label: 'Time (local)' }, { label: 'Key' }, { label: 'Gateway key' }, { label: 'App' }, { label: 'Model' }, { label: 'Status', num: true }, { label: 'Error' }],
+        D.errors.map((e) => [e.time ? localTime(e.time) : e.timeLocal, keyName(e.slot), e.client || '—', e.app || 'untagged', e.model || 'unknown', String(e.status), e.errorType || '—'])));
     }
   }
 

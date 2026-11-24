@@ -1,6 +1,6 @@
 # Claude multi-key Cloudflare Worker
 
-A **native Anthropic Messages API** gateway on Cloudflare Workers that pools up to six Anthropic Console API keys (one per organization, e.g. the monthly API credit of several Claude Max accounts) behind your own gateway keys. It accepts any model ID the keys can use, spends the credit that expires soonest first, fails over when a key is out of credit or failing, records usage, and serves a live dashboard with phone alerts. It does not use LiteLLM.
+A **native Anthropic Messages API** gateway on Cloudflare Workers that pools up to six Anthropic Console API keys (one per organization, e.g. the monthly API credit of several Claude Max accounts) behind your own gateway keys. It accepts any model ID the keys can use, spends the credit that expires soonest first, fails over when a key is out of credit or failing, records usage, and serves a live dashboard with phone alerts. One OpenAI key can be added beside them, served separately in OpenAI's format (see "GPT (OpenAI) key"). It does not use LiteLLM.
 
 - Live dashboard: https://claude-multi-key-gateway.yunkangchen2017.workers.dev/
 - Picking the project up (current state, runbook, decisions, open items): [HANDOVER.md](HANDOVER.md)
@@ -66,7 +66,7 @@ $payload = @{
 Invoke-RestMethod -Uri "$base/v1/messages" -Method Post -Headers $headers -ContentType 'application/json' -Body $payload
 ```
 
-The dashboard lists every model the keys can use; see also the [Claude model documentation](https://platform.claude.com/docs/en/about-claude/models/overview). `anthropic-version` is required by Anthropic (`2023-06-01` is current; the SDKs send it for you). Requests are made with native Anthropic JSON, **not OpenAI Chat Completions**.
+The dashboard lists every model the keys can use; see also the [Claude model documentation](https://platform.claude.com/docs/en/about-claude/models/overview). `anthropic-version` is required by Anthropic and passed through unchanged; the SDKs send it for you (newer releases send `2026-10-21`, on which `temperature`, `top_p` and `top_k` are rejected), and `2023-06-01` still works. Requests are made with native Anthropic JSON, **not OpenAI Chat Completions**.
 
 Example using `@anthropic-ai/sdk`:
 
@@ -99,6 +99,24 @@ The local scripts (`sync-usage.ps1`, `gateway-status.ps1`, `test-gateway.ps1`) u
 ## Replace an account key
 
 All six slots are in use. To replace one (revoked or leaked key, another account), paste the new key with `npx wrangler secret put ANTHROPIC_KEY_N`; no deploy or code change is needed. If the account renews on a different day, also change its `CREDIT_EXPIRY_DAY_N` (below) and deploy. A seventh slot needs a small code change (see HANDOVER.md). The Console steps are in [ADD-KEYS.md](ADD-KEYS.md), part 2.
+
+## GPT (OpenAI) key
+
+One OpenAI API key can sit beside the Claude keys, with its own entry point in OpenAI's format at `https://<worker>/openai/v1`. Use the official OpenAI SDK with that base URL and a gateway key as the API key:
+
+```python
+from openai import OpenAI
+client = OpenAI(api_key="<gateway key>", base_url="https://claude-multi-key-gateway.yunkangchen2017.workers.dev/openai/v1")
+reply = client.responses.create(model="gpt-6.1-sol", input="Hello")
+```
+
+- **Set up:** `npx wrangler secret put OPENAI_API_KEY`, then set `OPENAI_CREDIT_EXPIRY_DAY` (day of the month its monthly credit expires, UTC) and `OPENAI_MONTHLY_CREDIT_USD` in `wrangler.jsonc` and deploy. Leave auto-recharge off in OpenAI's billing settings, or requests are charged to the card once the credit runs out. The steps in Chinese are in [ADD-KEYS.md](ADD-KEYS.md), part 3.
+- **Separate from Claude:** GPT requests only use the GPT key, and Claude requests never go to it; nothing about `/v1/messages` changes. While the GPT key is out of credit, GPT requests fail with OpenAI's own `429 credit_balance_exhausted`.
+- **Supported:** `POST /openai/v1/chat/completions`, `POST /openai/v1/responses` (both with streaming), `POST /openai/v1/responses/input_tokens`, `GET /openai/v1/responses/{id}`, `POST /openai/v1/embeddings`, `GET /openai/v1/models`. Images, audio, files, batches and realtime are not passed through (404).
+- **Tracking:** recorded like Claude requests (as key "GPT"), counted in the same `DAILY_SPEND_CAP_USD`, with phone alerts when the key stops working or comes back. Cost is estimated from OpenAI's pricing page (its markdown version, read daily; built-in fallback), including cached input, 30-minute and 12-hour cache writes, prompts over 272K tokens, and the Flex, Fast and Ultrafast tiers. Not modelled: data-residency uplifts and discounted background windows. Background-mode responses (`background: true`) are recorded without usage, because it only arrives later.
+- **Streaming Chat Completions** report usage only when asked, so the gateway adds `stream_options: {"include_usage": true}` when the caller didn't set `stream_options`: the stream then ends with one extra chunk that has empty `choices` and the usage (the official SDKs handle it).
+- **Key check:** every `KEY_CHECK_INTERVAL_MINUTES`, a one-token embedding request to `OPENAI_CHECK_MODEL` (about $0.00000002) shows on the dashboard whether the key works and has credit.
+- Responses carry `x-gateway-backend: gpt`.
 
 ## Spend soonest-expiring credit first
 
@@ -171,7 +189,7 @@ To recreate the database elsewhere: `npx wrangler d1 create claude-usage`, put i
 - Every response carries `x-gateway-backend: N` — the slot (1-6) of the key that served it, never the key itself.
 - **No credit balance feed**: Anthropic's API doesn't report remaining credit, so routing uses the configured renewal days and the "credit balance is too low" error, and the dashboard's spend figures are estimates of traffic through the gateway.
 - **No guarantee against paid usage**: if an organization has purchased credits, auto-reload, or postpaid billing enabled, requests may spend money after promotional credits run out. Configure each Console account accordingly.
-- Native Anthropic endpoints only: `POST /v1/messages` (including streaming as pass-through), `POST /v1/messages/count_tokens`, `GET /v1/models`, `GET /v1/models/{id}`. No OpenAI-compatible `/v1/chat/completions`, files, batches, or other endpoints.
+- Native Anthropic endpoints only for Claude: `POST /v1/messages` (including streaming as pass-through), `POST /v1/messages/count_tokens`, `GET /v1/models`, `GET /v1/models/{id}`. Claude models can't be called in OpenAI's format; `/openai/v1/...` goes to the GPT key only. No files, batches, or other endpoints.
 - Streaming response body passes through unchanged once the upstream starts returning successfully; the Worker never retries in the middle of a stream.
 - Requests with ambiguous fetch/network errors are not retried to avoid duplicate charges.
 - Production: add rate limiting/access policies, logging of metadata without secrets, and stronger abuse protection if this gateway is made accessible outside your own trusted applications. Keep GATEWAY_KEY server-side, never in public frontend JavaScript.

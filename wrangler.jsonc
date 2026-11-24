@@ -28,6 +28,13 @@
     // Most the gateway may spend in any rolling 24 hours; further requests get a 429 until spending ages out.
     // A runaway guard ("0" = no cap). Phone alerts at 80% and 100% when the NTFY_TOPIC secret is set.
     "DAILY_SPEND_CAP_USD": "100",
+    // The GPT key (secret OPENAI_API_KEY), served in OpenAI's format at /openai/v1/...: the day of the month its
+    // monthly credit expires (UTC, "0" = unknown) and the credit it gets each month ("0" = unknown: spend is shown
+    // without a meter). Edit, then run: npx wrangler deploy
+    "OPENAI_CREDIT_EXPIRY_DAY": "17",
+    "OPENAI_MONTHLY_CREDIT_USD": "100",
+    // Model the GPT key check sends a one-token embedding request to (about $0.00000002 per check).
+    "OPENAI_CHECK_MODEL": "text-embedding-3-small",
     // This Worker's address, used as the link in phone notifications.
     "PUBLIC_URL": "https://claude-multi-key-gateway.yunkangchen2017.workers.dev"
   }

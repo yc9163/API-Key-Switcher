@@ -4,12 +4,17 @@
 # With the fake Anthropic API running (`npm run mock`, see DEVELOPMENT.md) these fake keys exercise every path
 # without real credentials or credit:
 #   sk-good-*   works        sk-broke   out of credit (until toggled)        sk-revoked   401
+#   sk-openai-good   the GPT key (out of credit while the mock's gptBroke is on)
 GATEWAY_KEY=local-dev-gateway-key
 GATEWAY_KEY_PHONE=local-dev-phone-key
 ANTHROPIC_KEY_1=sk-good-one
 ANTHROPIC_KEY_2=sk-broke
 ANTHROPIC_KEY_3=sk-revoked
+OPENAI_API_KEY=sk-openai-good
+OPENAI_CREDIT_EXPIRY_DAY=15
+OPENAI_MONTHLY_CREDIT_USD=50
 UPSTREAM_ORIGIN=http://127.0.0.1:8798
+OPENAI_UPSTREAM_ORIGIN=http://127.0.0.1:8798/openai
 NTFY_TOPIC=local-test
 NTFY_SERVER=http://127.0.0.1:8798/__ntfy
 

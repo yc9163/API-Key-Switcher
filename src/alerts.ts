@@ -1,7 +1,7 @@
 /** Phone notifications through ntfy (https://ntfy.sh): a key that stops working or comes back, and the rolling
  * 24-hour spending cap. Each change is sent once: alert_state records the last state notified, and only the
  * instance whose conditional write succeeds sends. Everything here is best effort and never blocks a request. */
-import { backends, spendCap, type Env } from './shared';
+import { backends, OPENAI_SLOT, spendCap, type Env } from './shared';
 
 type CapLevel = 'ok' | 'warn' | 'hit';
 const CAP_WARN_SHARE = 0.8;
@@ -43,9 +43,16 @@ export async function keyAlert(env: Env, slot: number, down: boolean, reason: st
       : await db.prepare(`UPDATE alert_state SET value = 'ok', updated_at = ?2 WHERE name = ?1 AND value = 'down'`)
           .bind(`key:${slot}`, now).run();
     if (!changed.meta.changes) return;
+    if (slot === OPENAI_SLOT) {
+      // The GPT key has no stand-in: while it is down, GPT requests through the gateway fail.
+      await notify(env, down
+        ? { title: 'GPT key 不可用', message: `GPT: ${reason}\n经过 gateway 的 GPT 请求现在都会失败（Claude 不受影响）。`, priority: 'high', tags: ['rotating_light'] }
+        : { title: 'GPT key 恢复正常', message: `GPT key 又可以用了。${reason ? `\n${reason}` : ''}`, priority: 'default', tags: ['white_check_mark'] });
+      return;
+    }
     const total = backends(env, Date.now()).length;
-    const row = await db.prepare(`SELECT COUNT(*) AS n FROM alert_state WHERE name LIKE 'key:%' AND value = 'down'`)
-      .first<{ n: number }>();
+    const row = await db.prepare(`SELECT COUNT(*) AS n FROM alert_state WHERE name LIKE 'key:%' AND name != ?1 AND value = 'down'`)
+      .bind(`key:${OPENAI_SLOT}`).first<{ n: number }>();
     const usable = Math.max(0, total - (row?.n ?? 0));
     if (down) {
       await notify(env, {

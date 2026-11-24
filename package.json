@@ -9,7 +9,7 @@
   "scripts": {
     "mock": "node dev/mock-anthropic.mjs",
     "dev": "wrangler dev --ip 127.0.0.1 --port 8799",
-    "test": "node --test test/usage.test.ts test/pricing.test.ts",
+    "test": "node --test test/usage.test.ts test/pricing.test.ts test/openai.test.ts",
     "check": "tsc --noEmit",
     "migrate:local": "wrangler d1 migrations apply claude-usage --local",
     "migrate": "wrangler d1 migrations apply claude-usage --remote",

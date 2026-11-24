@@ -25,14 +25,24 @@ export interface Env {
   PUBLIC_URL?: string; // This Worker's address, for links in phone notifications.
   NTFY_TOPIC?: string; // Secret ntfy.sh topic for phone notifications; unset = no notifications.
   NTFY_SERVER?: string; // ntfy server (default https://ntfy.sh).
+  // One OpenAI key, served at /openai/v1/... (its own entry point; never a fallback for Claude requests).
+  OPENAI_API_KEY?: string;
+  OPENAI_CREDIT_EXPIRY_DAY?: string; // Day of the month (UTC) its monthly credit expires; "0" or unset = unknown.
+  OPENAI_MONTHLY_CREDIT_USD?: string; // Credit it receives per billing cycle; "0" or unset = unknown.
+  OPENAI_CHECK_MODEL?: string; // Model the key check sends a one-token embedding request to.
   USAGE_DB?: D1Database;
   UPSTREAM_ORIGIN?: string; // Local testing only (a mock Anthropic API); unset in production.
+  OPENAI_UPSTREAM_ORIGIN?: string; // Local testing only (the mock's OpenAI side); unset in production.
 }
 export interface Expiry { day: number; date: string; daysLeft: number }
-export interface Backend { slot: number; key: string; expiry: Expiry | null }
+export type Provider = 'anthropic' | 'openai';
+export interface Backend { slot: number; key: string; expiry: Expiry | null; provider: Provider }
 
 export const SLOTS = [1, 2, 3, 4, 5, 6];
+// The OpenAI key's slot number in the usage tables and key state (far from the Anthropic slots, which may grow).
+export const OPENAI_SLOT = 100;
 export const ANTHROPIC_ORIGIN = 'https://api.anthropic.com';
+export const OPENAI_ORIGIN = 'https://api.openai.com';
 export const DAY_MS = 86_400_000;
 export const HOUR_MS = 3_600_000;
 // Anthropic's exact out-of-credit message: "Your credit balance is too low to access the Anthropic API."
@@ -67,6 +77,9 @@ export function gatewayKeys(env: Env): { name: string; key: string }[] {
 }
 
 export const upstreamOrigin = (env: Env): string => env.UPSTREAM_ORIGIN || ANTHROPIC_ORIGIN;
+export const openaiOrigin = (env: Env): string => env.OPENAI_UPSTREAM_ORIGIN || OPENAI_ORIGIN;
+/** How a key slot is named on the dashboard and in notifications. */
+export const keyLabel = (slot: number): string => (slot === OPENAI_SLOT ? 'GPT' : `Key ${slot}`);
 export const utcDay = (t: number): string => new Date(t).toISOString().slice(0, 10);
 export const utcHour = (t: number): string => new Date(t).toISOString().slice(0, 13); // 'YYYY-MM-DDTHH'
 /** Start of the rolling 24-hour spending window: the current UTC hour and the 23 before it. */
@@ -111,9 +124,26 @@ export function backends(env: Env, now: number): Backend[] {
       slot,
       key: String(vars[`ANTHROPIC_KEY_${slot}`] ?? '').trim(),
       expiry: nextExpiry(Number(vars[`CREDIT_EXPIRY_DAY_${slot}`] ?? 0), now),
+      provider: 'anthropic' as const,
     }))
     .filter(({ key }) => key.length > 0);
 }
+
+/** The OpenAI key, if one is configured. Kept out of backends(): Claude requests never fail over to it. */
+export function openaiBackend(env: Env, now: number): Backend | null {
+  const key = env.OPENAI_API_KEY?.trim() ?? '';
+  return key ? { slot: OPENAI_SLOT, key, expiry: nextExpiry(Number(env.OPENAI_CREDIT_EXPIRY_DAY ?? 0), now), provider: 'openai' } : null;
+}
+
+/** Every configured key, Anthropic first: what the dashboard, key checks and alerts cover. */
+export function allKeys(env: Env, now: number): Backend[] {
+  const gpt = openaiBackend(env, now);
+  return gpt ? [...backends(env, now), gpt] : backends(env, now);
+}
+
+/** Credit a key receives per billing cycle (0 = not set). */
+export const monthlyCredit = (env: Env, b: Backend): number => b.provider === 'openai'
+  ? Math.max(0, Number(env.OPENAI_MONTHLY_CREDIT_USD) || 0) : Number(env.MONTHLY_CREDIT_USD) || 200;
 
 // Best effort, per Worker isolate: slot -> time (ms epoch) until which a recently failed key is tried last.
 export const cooldownUntil = new Map<number, number>();
@@ -171,10 +201,17 @@ export type HealthState = 'ok' | 'out_of_credit' | 'invalid_key' | 'billing' | '
 /** States in which a key cannot serve requests until someone acts or its credit renews. */
 export const UNUSABLE: ReadonlySet<HealthState> = new Set(['out_of_credit', 'invalid_key', 'billing', 'no_permission']);
 
-/** What an Anthropic response says about the key that made the request. */
+// OpenAI's 429 error codes for an organization without credit, and for spend or usage limits it has reached.
+const OPENAI_NO_CREDIT = /credit_balance_exhausted|insufficient_quota/;
+const OPENAI_LIMIT = /spend_limit_exceeded|usage_limit_exceeded/;
+
+/** What an Anthropic or OpenAI response says about the key that made the request. */
 export function classify(status: number, body: string): HealthState {
   if (status >= 200 && status < 300) return 'ok';
   if (status === 400 && OUT_OF_CREDIT.test(body)) return 'out_of_credit';
+  // Spend limits first: their error type can still be insufficient_quota; the code tells them apart.
+  if (status === 429 && OPENAI_LIMIT.test(body)) return 'billing';
+  if (status === 429 && OPENAI_NO_CREDIT.test(body)) return 'out_of_credit';
   if (status === 401) return 'invalid_key';
   if (status === 402) return 'billing';
   if (status === 403) return 'no_permission';
@@ -183,12 +220,13 @@ export function classify(status: number, body: string): HealthState {
   return 'probe_error';
 }
 
-/** Anthropic's error type / message from an error body, if it is one. */
+/** The error type / message from an Anthropic or OpenAI error body, if it is one (OpenAI's more specific `code`
+ * is preferred as the type). */
 export function errorDetails(text: string): { type: string | null; message: string | null } {
   try {
-    const e = (JSON.parse(text) as { error?: { type?: unknown; message?: unknown } }).error;
+    const e = (JSON.parse(text) as { error?: { type?: unknown; code?: unknown; message?: unknown } }).error;
     return {
-      type: typeof e?.type === 'string' ? e.type : null,
+      type: typeof e?.code === 'string' ? e.code : typeof e?.type === 'string' ? e.type : null,
       message: typeof e?.message === 'string' ? e.message.slice(0, 300) : null,
     };
   } catch {

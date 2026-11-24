@@ -179,6 +179,7 @@ foreach ($slot in $slots) {
     $ledger.Add([pscustomobject][ordered]@{
       date_utc = '{0:yyyy-MM-dd}' -f $day
       slot = [int]$slot
+      key = $(if ([int]$slot -eq 100) { 'GPT' } else { "Key $slot" }) # slot 100 = the GPT (OpenAI) key
       requests = $t.requests
       errors = $t.errors
       input_tokens = $t.input
@@ -220,14 +221,16 @@ $report = Join-Path $dir 'report.html'
 # --- Short console summary; the dashboard has the full picture.
 $d = $raw | ConvertFrom-Json
 ''
-foreach ($k in ($d.keys | Sort-Object priority)) {
+foreach ($k in ($d.keys | Sort-Object { if ($null -eq $_.priority) { 999 } else { $_.priority } })) { # GPT (no priority) last
   $state = 'standby'
   if ($k.outOfCreditUntil) { $state = "OUT OF CREDIT until $($k.outOfCreditUntil.Substring(0, 10))" }
   elseif ($k.health -and $k.health.state -ne 'ok') { $state = "CHECK FAILED: $($k.health.state)" }
+  elseif ($k.provider -eq 'openai') { $state = 'ready for GPT' }
   elseif ($k.priority -eq 1) { $state = 'in use' }
   $renew = 'renewal day not set'
   if ($k.nextRenewal) { $renew = "renews $($k.nextRenewal)" }
-  'Key {0}: ${1:N2} of ${2} used this cycle ({3}) - {4}' -f $k.slot, $k.cycleToDate, $k.credit, $renew, $state
+  $name = $(if ($k.label) { $k.label } else { "Key $($k.slot)" })
+  '{0}: ${1:N2} of ${2} used this cycle ({3}) - {4}' -f $name, $k.cycleToDate, $k.credit, $renew, $state
 }
 'Spending pace: ${0:N2}/day (last 7 days). Estimates cover gateway traffic only; Console > Billing is exact.' -f $d.burnPerDay
 "Offline dashboard -> $report   (live: $Base/)"

@@ -1,22 +1,25 @@
 /** Minimal Anthropic API gateway that pools several Anthropic Console API keys.
  * Native Anthropic protocol only (including SSE streaming): POST /v1/messages,
  * POST /v1/messages/count_tokens, GET /v1/models and GET /v1/models/{id}.
+ * An OpenAI key, if configured, is served separately in OpenAI's own format under /openai/v1/... (src/openai.ts).
  * GET /gateway/status reports each key slot's priority, credit expiry, health and organization;
  * GET /gateway/usage pages through the per-request token usage recorded in D1; callers may label requests
  * with an `x-gateway-app: <project>` header for per-project breakdowns. /dashboard serves a live usage
  * dashboard; every key is re-checked at most every KEY_CHECK_INTERVAL_MINUTES, driven by traffic and dashboard loads.
  * Never logs prompts, API keys, or response bodies.
  */
-import { capAlert, keyAlert } from './alerts';
+import { keyAlert } from './alerts';
 import { checkKeys, creditReturnHint, cycleStartFor, describeHealth, handleDashboard, maybeCheckKeys } from './dashboard';
 import { maybeDiscover } from './discover';
+import { handleOpenAI } from './openai';
+import { maybeUpdateOpenAIPrices } from './openai-pricing';
 import { maybeUpdatePrices } from './pricing';
 import {
-  backends, classify, cooldownUntil, creditBackAt, error, errorDetails, gatewayKeys, json, keyOrder, keyState,
-  loadOutOfCredit, OUT_OF_CREDIT, sameSecret, setOutOfCredit, spendCap, spendState, upstreamOrigin,
+  backends, classify, cooldownUntil, creditBackAt, error, errorDetails, gatewayKeys, json, keyLabel, keyOrder, keyState,
+  loadOutOfCredit, openaiBackend, openaiOrigin, OUT_OF_CREDIT, sameSecret, setOutOfCredit, upstreamOrigin,
   type Backend, type Env,
 } from './shared';
-import { loadSpend, readHealth, saveHealth, saveUsage, usageRows } from './store';
+import { capMessage, overSpendCap, readHealth, saveHealth, saveUsage, usageRows } from './store';
 import { emptyUsage, meteredStream, requestModel, usageFromJson } from './usage';
 
 const MAX_BODY_BYTES = 32_000_000; // Anthropic's own Messages API request limit.
@@ -27,7 +30,6 @@ const ACCOUNT_400 = /credit balance|spend limit|billing|purchase credits/i;
 const AUTH_OR_BILLING_COOLDOWN_MS = 30 * 60_000;
 const MAX_RATE_LIMIT_COOLDOWN_MS = 10 * 60_000;
 const KEY_STATE_REFRESH_MS = 60_000;
-const SPEND_REFRESH_MS = 60_000;
 const PASS_HEADERS = ['content-type', 'request-id', 'retry-after', 'anthropic-organization-id',
   'anthropic-ratelimit-requests-limit', 'anthropic-ratelimit-requests-remaining', 'anthropic-ratelimit-requests-reset',
   'anthropic-ratelimit-tokens-limit', 'anthropic-ratelimit-tokens-remaining', 'anthropic-ratelimit-tokens-reset'];
@@ -47,34 +49,39 @@ function cooldownFor(status: number, retryAfter: string | null): number {
   return 0; // 403 can be model-specific and 5xx/529 are transient: fail over, but don't sideline the key.
 }
 
-/** Priority order plus a free GET /v1/models per key to confirm it works and learn its organization. */
+/** Priority order plus a free model list per key to confirm it works and learn its organization. The GPT key, if
+ * any, comes last with no priority: it only serves /openai requests. */
 async function status(env: Env, keys: Backend[], now: number, extra: Record<string, unknown>): Promise<Response> {
   const order = keyOrder(keys, now).map((b) => b.slot);
   const health = await readHealth(env);
-  const rows = await Promise.all(keys.map(async (b) => {
+  const gpt = openaiBackend(env, now);
+  const rows = await Promise.all([...keys, ...(gpt ? [gpt] : [])].map(async (b) => {
     let keyStatus: number | string;
     let organizationId: string | null = null;
+    const isGpt = b.provider === 'openai';
     try {
-      const r = await fetch(`${upstreamOrigin(env)}/v1/models?limit=1`, {
-        headers: { 'x-api-key': b.key, 'anthropic-version': '2023-06-01' },
-      });
+      const r = isGpt
+        ? await fetch(`${openaiOrigin(env)}/v1/models`, { headers: { authorization: `Bearer ${b.key}` } })
+        : await fetch(`${upstreamOrigin(env)}/v1/models?limit=1`, { headers: { 'x-api-key': b.key, 'anthropic-version': '2023-06-01' } });
       await r.body?.cancel();
       keyStatus = r.status;
-      organizationId = r.headers.get('anthropic-organization-id');
+      organizationId = r.headers.get(isGpt ? 'openai-organization' : 'anthropic-organization-id');
     } catch {
       keyStatus = 'unreachable';
     }
     const creditBack = keyState.outOfCredit.get(b.slot) ?? 0;
     const h = health.get(b.slot);
     return {
-      slot: b.slot, priority: order.indexOf(b.slot) + 1, credit_expiry_day: b.expiry?.day ?? null, credit_expires_utc: b.expiry?.date ?? 'unknown',
+      slot: b.slot, name: keyLabel(b.slot), provider: b.provider, priority: isGpt ? null : order.indexOf(b.slot) + 1,
+      credit_expiry_day: b.expiry?.day ?? null, credit_expires_utc: b.expiry?.date ?? 'unknown',
       days_left: b.expiry?.daysLeft ?? null, cooling_down: (cooldownUntil.get(b.slot) ?? 0) > now,
       out_of_credit_until: creditBack > now ? new Date(creditBack).toISOString() : null,
       key_status: keyStatus, organization_id: organizationId,
       health: h ? { state: h.state, http_status: h.http_status, message: h.message, checked_at: h.checked_at } : null,
     };
   }));
-  return json({ today_utc: new Date(now).toISOString().slice(0, 10), ...extra, keys: rows.sort((a, b) => a.priority - b.priority) });
+  return json({ today_utc: new Date(now).toISOString().slice(0, 10), ...extra,
+    keys: rows.sort((a, b) => (a.priority ?? 999) - (b.priority ?? 999)) });
 }
 
 export default {
@@ -86,8 +93,9 @@ export default {
     }
     const isStatus = url.pathname === '/gateway/status';
     const isUsage = url.pathname === '/gateway/usage';
-    const method = isStatus || isUsage ? 'GET' : allowedMethod(url.pathname);
-    if (!method) return error(404, 'Unsupported path. Supported: POST /v1/messages, POST /v1/messages/count_tokens, GET /v1/models, GET /gateway/status, GET /gateway/usage.');
+    const isOpenAI = url.pathname.startsWith('/openai/'); // its own paths and methods: src/openai.ts
+    const method = isStatus || isUsage ? 'GET' : isOpenAI ? request.method : allowedMethod(url.pathname);
+    if (!method) return error(404, 'Unsupported path. Supported: POST /v1/messages, POST /v1/messages/count_tokens, GET /v1/models, /openai/v1/... (OpenAI format), GET /gateway/status, GET /gateway/usage.');
     if (request.method !== method) return error(405, 'Method not allowed.');
     const allowed = gatewayKeys(env);
     if (allowed.length === 0) return error(503, 'Gateway is not configured.');
@@ -100,7 +108,6 @@ export default {
     if (isUsage) return usageRows(env, url);
     const now = Date.now();
     const keys = backends(env, now);
-    if (keys.length === 0) return error(503, 'No Anthropic backends configured.');
     if (isStatus) {
       await loadOutOfCredit(env);
       keyState.loadedAt = now;
@@ -111,26 +118,16 @@ export default {
       ctx.waitUntil(loadOutOfCredit(env)); // This request uses the current view; later ones see the refresh.
     }
     ctx.waitUntil(maybeCheckKeys(env, now)); // Background key check, at most once per KEY_CHECK_INTERVAL_MINUTES.
-    ctx.waitUntil(maybeUpdatePrices(env, now)); // Keeps the price table current (pricing page read at most daily).
+    ctx.waitUntil(maybeUpdatePrices(env, now)); // Keeps the price tables current (pricing pages read at most daily).
+    ctx.waitUntil(maybeUpdateOpenAIPrices(env, now));
     ctx.waitUntil(maybeDiscover(env, now, cycleStartFor(now))); // Models per key, cost-report access (daily).
+    if (isOpenAI) return handleOpenAI(request, env, ctx, url, client, now);
+    if (keys.length === 0) return error(503, 'No Anthropic backends configured.');
     const metered = url.pathname === '/v1/messages'; // count_tokens and models are free.
-    const cap = spendCap(env);
-    if (metered && cap) {
-      // Spending cap over the rolling 24 hours. A new instance loads the figure before its first request; after
-      // that it is refreshed in the background at most once a minute. A runaway guard: in-flight requests and
-      // other instances can overshoot it a little.
-      if (spendState.loadedAt === 0) {
-        spendState.loadedAt = now;
-        ctx.waitUntil(capAlert(env, await loadSpend(env, now)));
-      } else if (now - spendState.loadedAt > SPEND_REFRESH_MS) {
-        spendState.loadedAt = now;
-        ctx.waitUntil(loadSpend(env, now).then((spent) => capAlert(env, spent)));
-      }
-      if (spendState.spent >= cap) {
-        return new Response(JSON.stringify({ type: 'error', error: { type: 'rate_limit_error',
-          message: `Gateway spending cap reached: about $${spendState.spent.toFixed(2)} spent in the last 24 hours (cap $${cap.toFixed(2)}). Requests resume as older spending leaves the 24-hour window.` } }),
-          { status: 429, headers: { 'content-type': 'application/json', 'cache-control': 'no-store', 'retry-after': '900' } });
-      }
+    // Spending cap over the rolling 24 hours, shared with GPT requests.
+    if (metered && await overSpendCap(env, ctx, now)) {
+      return new Response(JSON.stringify({ type: 'error', error: { type: 'rate_limit_error', message: capMessage(env) } }),
+        { status: 429, headers: { 'content-type': 'application/json', 'cache-control': 'no-store', 'retry-after': '900' } });
     }
     const incomingVersion = request.headers.get('anthropic-version');
     if (!incomingVersion) return error(400, 'anthropic-version header is required.');

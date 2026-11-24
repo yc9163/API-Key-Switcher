@@ -2,11 +2,13 @@
 import template from '../report-template.html';
 import { alertsEnabled, keyAlert } from './alerts';
 import { anthropicStatus, discovery, maybeDiscover } from './discover';
+import { checkOpenAI, reasonFor } from './openai';
+import { maybeUpdateOpenAIPrices, OPENAI_PRICING_URL, openaiPriceFor, openaiPriceState } from './openai-pricing';
 import { estimateCost, maybeUpdatePrices, priceFor, priceState, PRICING_URL } from './pricing';
 import {
-  addDays, backends, classify, creditBackAt, cycleStart, DAY_MS, error, errorDetails, json, keyOrder, keyState,
-  loadOutOfCredit, nextRenewalAfter, sameSecret, setOutOfCredit, spendCap, spendWindowStart, UNUSABLE, upstreamOrigin,
-  utcDay, utcHour, type Backend, type Env,
+  addDays, allKeys, backends, classify, creditBackAt, cycleStart, DAY_MS, error, errorDetails, json, keyLabel, keyOrder,
+  keyState, loadOutOfCredit, monthlyCredit, nextRenewalAfter, OPENAI_SLOT, sameSecret, setOutOfCredit, spendCap,
+  spendWindowStart, UNUSABLE, upstreamOrigin, utcDay, utcHour, type Backend, type Env,
 } from './shared';
 import { dailyUpsert, healthUpsert, readHealth, spendInWindow, type HealthResult } from './store';
 import { usageFromJson } from './usage';
@@ -29,7 +31,7 @@ export async function maybeCheckKeys(env: Env, now: number): Promise<void> {
   if (!db || now < nextCheckDue) return;
   const interval = checkIntervalMs(env);
   nextCheckDue = now + interval; // Claim first, so concurrent requests here don't all check.
-  const slots = backends(env, now).map((b) => b.slot);
+  const slots = allKeys(env, now).map((b) => b.slot);
   if (slots.length === 0) return;
   try {
     const row = await db.prepare(`SELECT COUNT(*) AS n, MIN(checked_at) AS oldest FROM key_health
@@ -45,15 +47,17 @@ export async function maybeCheckKeys(env: Env, now: number): Promise<void> {
   await checkKeys(env, now);
 }
 
-/** Sends every key a zero-output request (max_tokens: 0 bills a few input tokens and generates nothing) so a
- * key that is revoked, out of credit or otherwise broken shows up even while it is on standby. */
+/** Sends every Claude key a zero-output request (max_tokens: 0 bills a few input tokens and generates nothing) so a
+ * key that is revoked, out of credit or otherwise broken shows up even while it is on standby; the GPT key gets a
+ * one-token embedding request instead. */
 export async function checkKeys(env: Env, now: number): Promise<void> {
   const db = env.USAGE_DB;
-  const keys = backends(env, now);
+  const keys = allKeys(env, now);
   if (!db || keys.length === 0) return;
   await loadOutOfCredit(env);
   const model = env.HEALTH_CHECK_MODEL || 'claude-opus-5-5';
   const results = await Promise.all(keys.map(async (b) => {
+    if (b.provider === 'openai') return { b, text: '', h: await checkOpenAI(env, b) };
     let status = 0;
     let text = '';
     let headers: Headers | null = null;
@@ -89,7 +93,7 @@ export async function checkKeys(env: Env, now: number): Promise<void> {
       await setOutOfCredit(env, b.slot, null);
     }
     statements.push(healthUpsert(db, h, now));
-    if (h.state === 'ok') {
+    if (h.state === 'ok' && b.provider === 'anthropic') { // the GPT check costs about $0.00000002: not recorded
       const usage = usageFromJson(text, model);
       statements.push(dailyUpsert(db, utcDay(now), b.slot, '', HEALTH_APP, usage.model, false, usage, estimateCost(usage) ?? 0));
     }
@@ -101,7 +105,7 @@ export async function checkKeys(env: Env, now: number): Promise<void> {
   }
   // Phone notifications for keys that stopped working or came back (warnings like rate limits don't notify).
   await Promise.all(results.map(({ b, h }) => {
-    if (UNUSABLE.has(h.state)) return keyAlert(env, b.slot, true, describeHealth(h, b));
+    if (UNUSABLE.has(h.state)) return keyAlert(env, b.slot, true, b.provider === 'openai' ? reasonFor(h, b) : describeHealth(h, b));
     if (h.state === 'ok') return keyAlert(env, b.slot, false, creditReturned.has(b.slot) ? creditReturnHint(b, now) : '');
     return Promise.resolve();
   }));
@@ -155,8 +159,7 @@ export const cycleStartFor = (now: number) => (b: Backend): string =>
 export async function dashboardData(env: Env, now: number) {
   const db = env.USAGE_DB!;
   const today = utcDay(now);
-  const credit = Number(env.MONTHLY_CREDIT_USD) || 200;
-  const keys = backends(env, now);
+  const keys = allKeys(env, now);
   await loadOutOfCredit(env);
   keyState.loadedAt = now;
   const [dailyRes, errorsRes, firstRes, hourlyRes] = await db.batch([
@@ -172,7 +175,7 @@ export async function dashboardData(env: Env, now: number) {
   const windowFrom = spendWindowStart(now);
   const spent24h = hourly.filter((h) => h.hour >= windowFrom).reduce((a, h) => a + h.est_cost_usd, 0);
   const health = await readHealth(env);
-  const order = keyOrder(keys, now).map((b) => b.slot);
+  const order = keyOrder(backends(env, now), now).map((b) => b.slot); // Claude failover order; GPT has none
   const sum = (filter: (r: DailyRow) => boolean) => rows.filter(filter).reduce((a, r) => a + r.est_cost_usd, 0);
 
   const checkModel = env.HEALTH_CHECK_MODEL || 'claude-opus-5-5';
@@ -185,12 +188,14 @@ export async function dashboardData(env: Env, now: number) {
     const creditBack = keyState.outOfCredit.get(b.slot) ?? 0;
     return {
       slot: b.slot,
-      priority: order.indexOf(b.slot) + 1,
+      label: keyLabel(b.slot),
+      provider: b.provider,
+      priority: b.provider === 'anthropic' ? order.indexOf(b.slot) + 1 : null,
       renewDay,
       cycleStart: start,
       nextRenewal: next,
       daysLeft: next ? Math.round((Date.parse(`${next}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / DAY_MS) : null,
-      credit,
+      credit: monthlyCredit(env, b), // 0 = not set
       cycleToDate: start ? sum((r) => r.slot === b.slot && r.day >= start) : 0,
       today: sum((r) => r.slot === b.slot && r.day === today),
       outOfCreditUntil: creditBack > now ? new Date(creditBack).toISOString() : null,
@@ -198,8 +203,8 @@ export async function dashboardData(env: Env, now: number) {
       health: h ? { state: h.state, httpStatus: h.http_status, message: h.message, checkedAt: h.checked_at } : null,
       orgId: h?.organization_id?.slice(0, 8) ?? null, // enough to tell organizations apart on a public page
       // From the key check's response headers: this organization's limits for HEALTH_CHECK_MODEL, and its tier.
-      limits: h?.rpm ? { model: checkModel, rpm: h.rpm, itpm: h.itpm, otpm: h.otpm } : null,
-      tier: tierOf(checkModel, h?.rpm ?? null),
+      limits: h?.rpm && b.provider === 'anthropic' ? { model: checkModel, rpm: h.rpm, itpm: h.itpm, otpm: h.otpm } : null,
+      tier: b.provider === 'anthropic' ? tierOf(checkModel, h?.rpm ?? null) : null,
       // Anthropic's own figure for this cycle, only if the cost report ever accepts this key (normally Admin-only).
       exactCycleCost: start && discovery.costReport[b.slot]?.since === start ? discovery.costReport[b.slot].cycleCostUsd : null,
     };
@@ -208,14 +213,20 @@ export async function dashboardData(env: Env, now: number) {
   // Base prices of the models seen, so the page can split cost by token type and work out cache savings.
   const prices: Record<string, number[]> = {};
   for (const r of rows) {
-    const p = r.model ? priceFor(r.model) : null;
+    const p = r.model ? priceFor(r.model) ?? openaiPriceFor(r.model) : null;
     if (p) prices[r.model] = p;
   }
 
   // Spending pace: average per day over the last 7 days (or since the first record), over at least one day.
   const first = (firstRes.results[0] as { first: string | null } | undefined)?.first ?? today;
   const windowStart = first > addDays(today, -6) ? first : addDays(today, -6);
-  const burnPerDay = sum((r) => r.day >= windowStart) / Math.max(1, (now - Date.parse(`${windowStart}T00:00:00Z`)) / DAY_MS);
+  const days = Math.max(1, (now - Date.parse(`${windowStart}T00:00:00Z`)) / DAY_MS);
+  const burnPerDay = sum((r) => r.day >= windowStart) / days;
+  // Each provider's credit is only spent by its own requests, so projections use each one's own pace.
+  const burnByProvider = {
+    anthropic: sum((r) => r.day >= windowStart && r.slot !== OPENAI_SLOT) / days,
+    openai: sum((r) => r.day >= windowStart && r.slot === OPENAI_SLOT) / days,
+  };
 
   return {
     live: true,
@@ -223,6 +234,7 @@ export async function dashboardData(env: Env, now: number) {
     todayUtc: today,
     dayFractionElapsed: (now - Date.parse(`${today}T00:00:00Z`)) / DAY_MS,
     burnPerDay,
+    burnByProvider,
     keys: keyData,
     // One compact row per day / key slot / gateway key / app / model; the page groups and filters these.
     rowFields: ['day', 'slot', 'client', 'app', 'model', 'requests', 'errors', 'input', 'output', 'cacheWrite', 'cacheRead', 'cost'],
@@ -234,7 +246,9 @@ export async function dashboardData(env: Env, now: number) {
     cap: { limit: spendCap(env), spent24h },
     alertsEnabled: alertsEnabled(env),
     // Where cost estimates come from: Anthropic's pricing page (read daily) or the built-in table.
-    pricing: { source: priceState.table ? PRICING_URL : 'built-in', fetchedAt: priceState.fetchedAt, error: priceState.error },
+    pricing: { source: priceState.table ? PRICING_URL : 'built-in', fetchedAt: priceState.fetchedAt, error: priceState.error,
+      openai: keys.some((b) => b.provider === 'openai') ? { source: openaiPriceState.table ? OPENAI_PRICING_URL : 'built-in',
+        fetchedAt: openaiPriceState.fetchedAt, error: openaiPriceState.error } : null },
     // Found through Anthropic's APIs (src/discover.ts): models each key can use, cost-report access, service status.
     models: Object.entries(discovery.models)
       .map(([id, m]) => ({ id, name: m.name, created: m.created, maxInput: m.maxInput, maxOutput: m.maxOutput,
@@ -293,6 +307,7 @@ async function dataResponse(env: Env, now: number, fresh: boolean): Promise<Resp
   if (fresh || !dataCache || now - dataCache.at >= DATA_CACHE_MS) {
     await maybeCheckKeys(env, now); // Opening the page after a quiet spell shows fresh key status.
     await maybeUpdatePrices(env, now);
+    await maybeUpdateOpenAIPrices(env, now);
     await maybeDiscover(env, now, cycleStartFor(now));
     const data = await dashboardData(env, now);
     const latestCheck = Math.max(0, ...data.keys.map((k) => (k.health ? Date.parse(k.health.checkedAt) : 0)));

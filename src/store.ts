@@ -1,13 +1,18 @@
 /** D1 writes and reads for usage records, daily totals and key health. Every write is best effort:
  * tracking must never break or slow down an API request. */
+import { capAlert } from './alerts';
 import { estimateCost } from './pricing';
-import { error, json, spendState, spendWindowStart, utcDay, utcHour, type Env, type HealthState } from './shared';
+import { error, json, spendCap, spendState, spendWindowStart, utcDay, utcHour, type Env, type HealthState } from './shared';
 import type { Usage } from './usage';
 
-/** What one /v1/messages call cost, for the usage table. */
+const SPEND_REFRESH_MS = 60_000;
+
+/** What one metered call (Claude /v1/messages, or an OpenAI generation or embedding) cost, for the usage table. */
 export interface Outcome {
   slot: number; organizationId: string | null; status: number; errorType: string | null; stream: boolean;
   completed: boolean; failovers: number; requestId: string | null; app: string | null; client: string; usage: Usage;
+  /** Cost already worked out by the caller (OpenAI prices); otherwise Claude's prices are used. */
+  cost?: number | null;
 }
 export interface HealthResult {
   slot: number; state: HealthState; httpStatus: number | null; message: string | null; organizationId: string | null;
@@ -33,7 +38,7 @@ export async function saveUsage(env: Env, startedAt: number, o: Outcome): Promis
   const db = env.USAGE_DB;
   if (!db) return;
   const u = o.usage;
-  const cost = o.status === 200 ? estimateCost(u) : 0;
+  const cost = o.status === 200 ? (o.cost !== undefined ? o.cost : estimateCost(u)) : 0;
   try {
     // One transaction: the request row and its daily total land together or not at all.
     await db.batch([
@@ -73,6 +78,24 @@ export async function loadSpend(env: Env, now: number): Promise<number> {
   }
   return spendState.spent;
 }
+
+/** The spending cap over the rolling 24 hours, shared by Claude and GPT requests: true when it is reached. A new
+ * instance loads the figure before its first request; after that it is refreshed in the background at most once a
+ * minute. A runaway guard: in-flight requests and other instances can overshoot it a little. */
+export async function overSpendCap(env: Env, ctx: ExecutionContext, now: number): Promise<boolean> {
+  const cap = spendCap(env);
+  if (!cap) return false;
+  if (spendState.loadedAt === 0) {
+    spendState.loadedAt = now;
+    ctx.waitUntil(capAlert(env, await loadSpend(env, now)));
+  } else if (now - spendState.loadedAt > SPEND_REFRESH_MS) {
+    spendState.loadedAt = now;
+    ctx.waitUntil(loadSpend(env, now).then((spent) => capAlert(env, spent)));
+  }
+  return spendState.spent >= cap;
+}
+
+export const capMessage = (env: Env): string => `Gateway spending cap reached: about $${spendState.spent.toFixed(2)} spent in the last 24 hours (cap $${spendCap(env).toFixed(2)}). Requests resume as older spending leaves the 24-hour window.`;
 
 export function healthUpsert(db: D1Database, h: HealthResult, checkedAt: number): D1PreparedStatement {
   // Limits and workspace keep their last known values when a result doesn't carry them (e.g. an error response).

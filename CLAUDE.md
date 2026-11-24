@@ -2,7 +2,8 @@
 
 Cloudflare Worker (`claude-multi-key-gateway`) that pools six Anthropic Console API keys (one per Claude Max account,
 each with monthly API credit) behind gateway keys, spends the soonest-expiring credit first, fails over between keys,
-records usage in D1 and serves a public dashboard at `/`. Live: https://claude-multi-key-gateway.yunkangchen2017.workers.dev
+records usage in D1 and serves a public dashboard at `/`. One OpenAI key is served separately in OpenAI's format at
+`/openai/v1` (never a fallback for Claude). Live: https://claude-multi-key-gateway.yunkangchen2017.workers.dev
 
 Start with [HANDOVER.md](HANDOVER.md): where everything lives, the current production state, the runbook, past decisions
 and open items. Read [DEVELOPMENT.md](DEVELOPMENT.md) before changing code (layout, local mock, tests, deploy order,

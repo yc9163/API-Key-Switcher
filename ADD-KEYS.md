@@ -10,6 +10,7 @@ Cloudflare Worker 名字：`claude-multi-key-gateway`
 |---|---|---|
 | **Gateway key** | 给某台设备、某个 app 或某个朋友调用网关用 | 随时可加，不改代码，几秒生效 → 看第一部分 |
 | **Anthropic 账号 key** | 网关背后真正花额度的 Max 账号 | 6 个位置已满；可以替换，第 7 个要改代码 → 看第二部分 |
+| **GPT（OpenAI）key** | 用 OpenAI 的格式调用 GPT，走网关单独的入口 `/openai/v1` | 只有 1 个位置，不改代码 → 看第三部分 |
 
 ---
 
@@ -188,6 +189,84 @@ npx wrangler deploy
 ### 加第 7 个及以上的账号
 
 现在代码只支持 6 个位置（`ANTHROPIC_KEY_1` 到 `ANTHROPIC_KEY_6`）。加第 7 个需要改几处代码并重新部署，见 HANDOVER.md 的 "Common situations"。
+
+---
+
+## 第三部分：GPT（OpenAI）key
+
+网关可以再放 1 个 OpenAI 的 API key。它有自己单独的入口 `https://claude-multi-key-gateway.yunkangchen2017.workers.dev/openai/v1`，用 OpenAI 自己的请求格式，和 Claude 完全分开：
+- GPT 请求只用这个 key；Claude 请求永远不会转到 GPT，GPT 也不会转到 Claude。
+- 用的还是同样的 gateway key，共用每天 $100 的花费上限，用量和花费显示在仪表盘的 "GPT" 那一行，key 不能用了会推送到手机。
+
+### 准备
+
+1. 在 platform.openai.com → **API keys** 里创建一个 key（以 `sk-` 开头）。
+2. 在 **Settings → Billing** 里**关掉 auto recharge（自动充值）**，不要绑定付款方式。否则额度用完后会开始扣真钱。
+3. 记下每个月的额度金额和过期日（UTC）。
+
+### 添加或更换
+
+在有这份代码的电脑上（先 `git pull`）：
+
+```powershell
+cd "C:\Users\YunkangChen\Desktop\api\claude-cloudflare-gateway\claude-cloudflare-gateway"
+npx wrangler secret put OPENAI_API_KEY
+```
+
+粘贴 OpenAI 的 key。更换 key 也是这条命令，旧的立刻失效。
+
+然后打开 `wrangler.jsonc`，填上额度金额和续期日（都要带引号）：
+
+```jsonc
+"OPENAI_CREDIT_EXPIRY_DAY": "15",
+"OPENAI_MONTHLY_CREDIT_USD": "50",
+```
+
+保存后运行 `npx wrangler deploy`，再 `git push`。没填的话也能用，只是仪表盘上没有额度进度条。
+
+### 确认（不花额度）
+
+```powershell
+Invoke-RestMethod -Uri "https://claude-multi-key-gateway.yunkangchen2017.workers.dev/openai/v1/models" `
+  -Headers @{ "authorization" = "Bearer 你的gateway key" }
+```
+
+返回模型列表就说明成功了。仪表盘上点 "Check keys now"，"GPT" 那一行应该显示 "Ready for GPT"。
+
+### 在设备上使用
+
+用 OpenAI 官方 SDK，把 base URL 设成网关的 `/openai/v1`，API key 填 **gateway key**（不是 OpenAI 的 key）：
+
+**Python：**
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    api_key="你的gateway key",
+    base_url="https://claude-multi-key-gateway.yunkangchen2017.workers.dev/openai/v1",
+)
+reply = client.responses.create(model="gpt-6.1-sol", input="Hello")
+```
+
+**TypeScript / JavaScript：**
+```typescript
+import OpenAI from 'openai';
+
+const client = new OpenAI({
+  apiKey: '你的gateway key',
+  baseURL: 'https://claude-multi-key-gateway.yunkangchen2017.workers.dev/openai/v1',
+});
+```
+
+支持 Chat Completions、Responses（都支持流式）、Embeddings 和模型列表；图片、语音、文件、Batch 不支持。
+
+### 停用
+
+```powershell
+npx wrangler secret delete OPENAI_API_KEY
+```
+
+停用后 `/openai/v1` 返回 503，仪表盘上的 "GPT" 那一行消失，以前的用量记录还在。
 
 ---
 
